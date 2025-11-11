@@ -2,6 +2,7 @@
 
 import queue
 import threading
+import xml
 from typing import Optional
 
 import code_repository
@@ -22,8 +23,9 @@ app = FastAPI(
     version=VERSION,
 )
 
+xml_path = "./model/robocasa/panda_omron.xml"
 # Create simulator instance and inject into code_repository
-simulator = MujocoSimulator()
+simulator = MujocoSimulator(xml_path=xml_path)
 code_repository.simulator = simulator
 
 # Thread-safe queue for action processing
@@ -90,9 +92,15 @@ def api_robot_pose():
 
 @app.get("/scene_objects")
 def api_scene_objects(
-    include_robot: bool = Query(default=False, description="Include robot bodies in the map."),
-    name_prefix: Optional[str] = Query(default=None, description="Filter objects by name prefix."),
-    limit: Optional[int] = Query(default=None, ge=1, le=2000, description="Trim number of objects returned."),
+    include_robot: bool = Query(
+        default=False, description="Include robot bodies in the map."
+    ),
+    name_prefix: Optional[str] = Query(
+        default=None, description="Filter objects by name prefix."
+    ),
+    limit: Optional[int] = Query(
+        default=None, ge=1, le=2000, description="Trim number of objects returned."
+    ),
 ):
     """Return list of environment items and their absolute pose."""
     objects = simulator.get_environment_map(

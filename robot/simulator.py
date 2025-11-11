@@ -1,8 +1,10 @@
 """MuJoCo robot simulator with automatic position control for Panda-Omron mobile manipulator."""
 
 import time
+
+import mujoco
+import mujoco.viewer
 import numpy as np
-import mujoco, mujoco.viewer
 
 
 class RobotConfig:
@@ -12,13 +14,13 @@ class RobotConfig:
     JOINT_NAMES = [
         "mobilebase0_joint_mobile_side",
         "mobilebase0_joint_mobile_forward",
-        "mobilebase0_joint_mobile_yaw"
+        "mobilebase0_joint_mobile_yaw",
     ]
 
     ACTUATOR_NAMES = [
         "mobilebase0_actuator_mobile_side",
         "mobilebase0_actuator_mobile_forward",
-        "mobilebase0_actuator_mobile_yaw"
+        "mobilebase0_actuator_mobile_yaw",
     ]
 
     # PD controller gains: [kp_x, kp_y, kp_theta]
@@ -45,17 +47,22 @@ class RobotConfig:
 class MujocoSimulator:
     """MuJoCo simulator with PD-controlled mobile base position tracking."""
 
-    def __init__(self, xml_path="../model/robocasa/panda_omron.xml"):
+    # def __init__(self, xml_path="../model/robocasa/panda_omron.xml"):
+    def __init__(self, xml_path="../model/panda_omron/panda_omron.xml"):
         """Initialize simulator with MuJoCo model and control indices."""
         self.model = mujoco.MjModel.from_xml_path(xml_path)
-        self.data  = mujoco.MjData(self.model)
+        self.data = mujoco.MjData(self.model)
         self._target_position = RobotConfig.INITIAL_POSITION.copy()
 
         # Resolve joint/actuator names to indices
-        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                         for name in RobotConfig.JOINT_NAMES]
-        self.actuator_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-                            for name in RobotConfig.ACTUATOR_NAMES]
+        self.joint_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            for name in RobotConfig.JOINT_NAMES
+        ]
+        self.actuator_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            for name in RobotConfig.ACTUATOR_NAMES
+        ]
         self.eef_body_id = self._resolve_body_id(RobotConfig.EEF_BODY_NAME)
 
     def get_target_position(self):
@@ -70,34 +77,52 @@ class MujocoSimulator:
 
     def get_current_position(self):
         """Get current position [x, y, theta] from joint states."""
-        return np.array([
-            self.data.qpos[self.joint_ids[0]],
-            self.data.qpos[self.joint_ids[1]],
-            self.data.qpos[self.joint_ids[2]]
-        ])
-    
+        return np.array(
+            [
+                self.data.qpos[self.joint_ids[0]],
+                self.data.qpos[self.joint_ids[1]],
+                self.data.qpos[self.joint_ids[2]],
+            ]
+        )
+
     def get_position_diff(self):
         """Get position error [delta_x, delta_y, delta_theta] between target and current position."""
         return self._target_position - self.get_current_position()
 
     def get_current_velocity(self):
         """Get current velocity [vx, vy, omega] from joint velocities."""
-        return np.array([
-            self.data.qvel[self.joint_ids[0]],
-            self.data.qvel[self.joint_ids[1]],
-            self.data.qvel[self.joint_ids[2]]
-        ])
+        return np.array(
+            [
+                self.data.qvel[self.joint_ids[0]],
+                self.data.qvel[self.joint_ids[1]],
+                self.data.qvel[self.joint_ids[2]],
+            ]
+        )
 
     def get_robot_pose(self):
         """Return dict with current robot pose and commanded target."""
         current = self.get_current_position()
         target = self.get_target_position()
         velocity = self.get_current_velocity()
-        theta_error = np.arctan2(np.sin(target[2] - current[2]), np.cos(target[2] - current[2]))
+        theta_error = np.arctan2(
+            np.sin(target[2] - current[2]), np.cos(target[2] - current[2])
+        )
         pose = {
-            "current": {"x": float(current[0]), "y": float(current[1]), "theta": float(current[2])},
-            "target": {"x": float(target[0]), "y": float(target[1]), "theta": float(target[2])},
-            "velocity": {"x": float(velocity[0]), "y": float(velocity[1]), "theta": float(velocity[2])},
+            "current": {
+                "x": float(current[0]),
+                "y": float(current[1]),
+                "theta": float(current[2]),
+            },
+            "target": {
+                "x": float(target[0]),
+                "y": float(target[1]),
+                "theta": float(target[2]),
+            },
+            "velocity": {
+                "x": float(velocity[0]),
+                "y": float(velocity[1]),
+                "theta": float(velocity[2]),
+            },
             "error": {
                 "x": float(target[0] - current[0]),
                 "y": float(target[1] - current[1]),
@@ -111,7 +136,9 @@ class MujocoSimulator:
 
     def _is_robot_body(self, name: str) -> bool:
         """Return True if body belongs to the robot."""
-        return any(name.startswith(prefix) for prefix in RobotConfig.ROBOT_BODY_PREFIXES)
+        return any(
+            name.startswith(prefix) for prefix in RobotConfig.ROBOT_BODY_PREFIXES
+        )
 
     def _resolve_body_id(self, name: str):
         """Resolve body name to MuJoCo id, returning None if missing."""
@@ -159,8 +186,17 @@ class MujocoSimulator:
         position = self.data.xpos[body_id]
         quat = self.data.xquat[body_id]
         return {
-            "position": {"x": float(position[0]), "y": float(position[1]), "z": float(position[2])},
-            "quaternion": {"w": float(quat[0]), "x": float(quat[1]), "y": float(quat[2]), "z": float(quat[3])},
+            "position": {
+                "x": float(position[0]),
+                "y": float(position[1]),
+                "z": float(position[2]),
+            },
+            "quaternion": {
+                "w": float(quat[0]),
+                "x": float(quat[1]),
+                "y": float(quat[2]),
+                "z": float(quat[3]),
+            },
             "yaw": self._quat_to_yaw(quat),
         }
 
@@ -176,7 +212,9 @@ class MujocoSimulator:
         current_vel = self.get_current_velocity()
 
         pos_error = self._target_position - current_pos
-        pos_error[2] = np.arctan2(np.sin(pos_error[2]), np.cos(pos_error[2]))  # Normalize angle
+        pos_error[2] = np.arctan2(
+            np.sin(pos_error[2]), np.cos(pos_error[2])
+        )  # Normalize angle
 
         return RobotConfig.KP * pos_error - RobotConfig.KD * current_vel
 
