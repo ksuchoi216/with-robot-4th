@@ -34,6 +34,27 @@ def set_target_position(x, y, theta, wait=True):
             time.sleep(0.1)
 
 
+def get_robot_pose():
+    """Return the robot's base pose, velocity, and end-effector coordinates."""
+    return simulator.get_robot_pose()
+
+
+def get_environment_map(include_robot=False, name_prefix=None, limit=None):
+    """
+    Return list of scene objects (name + pose) describing the environment.
+
+    Args:
+        include_robot: Include robot links/bodies when True.
+        name_prefix: Filter objects whose name starts with the prefix.
+        limit: Trim the list after sorting alphabetically.
+    """
+    return simulator.get_environment_map(
+        include_robot=include_robot,
+        name_prefix=name_prefix,
+        limit=limit,
+    )
+
+
 def exec_code(code):
     """
     Execute user code in sandboxed environment with robot control access.
@@ -44,12 +65,17 @@ def exec_code(code):
     Available in sandbox:
         - Builtins: print, range, float, time
         - Constants: PI (numpy.pi)
-        - Functions: set_target_position(x, y, theta, wait=True)
+        - Functions:
+            * set_target_position(x, y, theta, wait=True)
+            * get_robot_pose()
+            * get_environment_map(include_robot=False, name_prefix=None, limit=None)
     """
     # Define sandboxed environment with limited access
     safe_globals = {
         "__builtins__": {"print": print, "range": range, "float": float, "time": time},
         "PI": np.pi,
         "set_target_position": set_target_position,
+        "get_robot_pose": get_robot_pose,
+        "get_environment_map": get_environment_map,
     }
     exec(code, safe_globals)

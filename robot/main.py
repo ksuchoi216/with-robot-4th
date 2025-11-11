@@ -2,10 +2,11 @@
 
 import queue
 import threading
+from typing import Optional
 
 import code_repository
 import uvicorn
-from fastapi import FastAPI, Response, status
+from fastapi import FastAPI, Query, Response, status
 from fastapi.responses import JSONResponse
 from simulator import MujocoSimulator
 
@@ -79,6 +80,27 @@ def run_simulator():
 def read_root():
     """Get server info."""
     return {"name": "MuJoCo Robot Simulator", "version": VERSION, "status": "running"}
+
+
+@app.get("/robot_pose")
+def api_robot_pose():
+    """Return current / target base pose and velocity."""
+    return simulator.get_robot_pose()
+
+
+@app.get("/scene_objects")
+def api_scene_objects(
+    include_robot: bool = Query(default=False, description="Include robot bodies in the map."),
+    name_prefix: Optional[str] = Query(default=None, description="Filter objects by name prefix."),
+    limit: Optional[int] = Query(default=None, ge=1, le=2000, description="Trim number of objects returned."),
+):
+    """Return list of environment items and their absolute pose."""
+    objects = simulator.get_environment_map(
+        include_robot=include_robot,
+        name_prefix=name_prefix,
+        limit=limit,
+    )
+    return {"count": len(objects), "objects": objects}
 
 
 @app.post("/send_action")
