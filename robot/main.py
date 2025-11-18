@@ -29,43 +29,45 @@ code_repository.simulator = simulator
 actions_queue = queue.Queue()
 
 
-def process_actions():
+def process_actions(action):
     """Process action queue in background thread."""
-    print("Action processor started...")
-    while True:
-        try:
-            # Wait for action from queue (0.1s timeout to allow thread termination)
-            action = actions_queue.get(timeout=0.1)
-            action = action["action"]
+    # print("Action processor started...")
+    # while True:
+    #     try:
+    #         # Wait for action from queue (0.1s timeout to allow thread termination)
+    #         action = actions_queue.get(timeout=0.1)
+    #         action = action["action"]
 
-            print(f"\n{"="*60}")
-            print(f"Received Action:", action)
+    #         print(f"\n{"="*60}")
+    #         print(f"Received Action:", action)
 
             # Execute code action in sandboxed environment
-            if action["type"] == "run_code":
-                code_str = action["payload"].get("code")
-                try:
-                    code_repository.exec_code(code_str)
-                    print("Code execution completed successfully")
-                except Exception as e:
-                    # Log errors without crashing the simulator
-                    print(f"\n[EXECUTION ERROR]")
-                    print(f"  Type: {type(e).__name__}")
-                    print(f"  Message: {e}")
-                    import traceback
-                    print(f"\n[TRACEBACK]")
-                    traceback.print_exc()
-            print(f"{"="*60}\n")
-
-            actions_queue.task_done()
-
-        except queue.Empty:
-            # No action available, continue loop
-            continue
+    RESULT = {}
+    if action["type"] == "run_code":
+        code_str = action["payload"].get("code")
+        try:
+            RESULT = code_repository.exec_code(code_str)
+            print(f"Code execution completed: {RESULT}")
         except Exception as e:
-            print(f"Error processing action: {e}")
+            # Log errors without crashing the simulator
+            print(f"\n[EXECUTION ERROR]")
+            print(f"  Type: {type(e).__name__}")
+            print(f"  Message: {e}")
             import traceback
+            print(f"\n[TRACEBACK]")
             traceback.print_exc()
+    print(f"{"="*60}\n")
+    return RESULT
+
+        #     actions_queue.task_done()
+
+        # except queue.Empty:
+        #     # No action available, continue loop
+        #     continue
+        # except Exception as e:
+        #     print(f"Error processing action: {e}")
+        #     import traceback
+        #     traceback.print_exc()
 
 
 def run_simulator():
@@ -80,7 +82,7 @@ def read_root():
 
 
 @app.post("/send_action")
-def receive_action(action: dict):
+def receive_action(payload: dict):
     """
     Queue action for execution.
 
@@ -88,16 +90,16 @@ def receive_action(action: dict):
         {
             "action": {
                 "type": "run_code",
-                "payload": {"code": "set_target_position(0, 0, PI)"}
+                "payload": {"code": "get_mobile_target_joint([0, 0, PI])"}
             }
         }
     """
     # Validate action format
-    if "action" in action and "type" in action["action"] and "payload" in action["action"]:
-        actions_queue.put(action)
+    if "action" in payload and "type" in payload["action"] and "payload" in payload["action"]:
+        RESULT = process_actions(payload["action"])
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"status": "success", "action_feedback": "good"}
+            content={"status": "success", "result": RESULT}
         )
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -116,7 +118,7 @@ def main():
     """
     # Start background threads (daemon=True ensures cleanup on exit)
     threading.Thread(target=run_simulator, daemon=True).start()
-    threading.Thread(target=process_actions, daemon=True).start()
+    # threading.Thread(target=process_actions, daemon=True).start()
 
     # Display startup information
     print(f"\n{"="*60}")
@@ -132,4 +134,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -8,8 +8,9 @@ A REST API-based control system for Panda-Omron mobile manipulator simulation us
 - **REST API Control**: Send Python code via HTTP to control the robot
 - **Sandboxed Execution**: Safe code execution environment with limited access
 - **Mobile Base & Arm Control**: Holonomic drive system + 7-DOF Panda arm
-- **PD Controller**: Automatic position tracking with velocity-based convergence
-- **Asynchronous Processing**: Non-blocking action queue with optional blocking wait
+- **End Effector Control**: Basic delta movement (relative position control)
+- **PID Controller**: Mobile base with integral term for steady-state error elimination
+- **Synchronous Processing**: Blocking HTTP requests ensure action completion
 - **Adaptive Convergence**: Smart waiting with position + velocity stability checks
 
 ## Quick Start
@@ -36,12 +37,13 @@ Dependencies:
 - FastAPI 0.121.1
 - MuJoCo 3.3.7
 - uvicorn 0.38.0
+- scipy >= 1.10.0
 
 ### Running the Simulator
 
 ```bash
 cd robot
-python main.py # or mjpython main.py
+python main.py
 ```
 
 The server will start on `http://0.0.0.0:8800` with:
@@ -75,7 +77,7 @@ Content-Type: application/json
   "action": {
     "type": "run_code",
     "payload": {
-      "code": "set_mobile_target_position([0, 0, PI])"
+      "code": "set_mobile_target_joint([0, 0, PI])"
     }
   }
 }
@@ -87,12 +89,12 @@ Content-Type: application/json
 
 Move robot to position (x=0, y=0, theta=π):
 ```python
-set_mobile_target_position([0, 0, PI])
+set_mobile_target_joint([0, 0, PI])
 ```
 
 Move robot with verbose output and custom timeout:
 ```python
-set_mobile_target_position([2.0, 1.0, PI/2], timeout=5.0, verbose=True)
+set_mobile_target_joint([2.0, 1.0, PI/2], timeout=5.0, verbose=True)
 ```
 
 Move robot in square pattern:
@@ -105,7 +107,7 @@ positions = [
 ]
 
 for pos in positions:
-    set_mobile_target_position(pos)
+    set_mobile_target_joint(pos)
 ```
 
 #### Arm Control
@@ -113,13 +115,40 @@ for pos in positions:
 Move arm to home configuration:
 ```python
 home = [0, -0.785, 0, -2.356, 0, 1.571, 0.785]
-set_arm_target_position(home)
+set_arm_target_joint(home)
 ```
 
 Move arm with verbose monitoring:
 ```python
 reach_config = [0, 0.2, 0, -1.5, 0, 1.7, 0.785]
-set_arm_target_position(reach_config, verbose=True)
+set_arm_target_joint(reach_config, verbose=True)
+```
+
+#### End Effector Control (Delta Movement)
+
+Move end effector forward 10cm:
+```python
+move_ee_delta([0.1, 0.0, 0.0])
+```
+
+Get current end effector pose:
+```python
+# Returns tuple: (position, orientation)
+pos, ori = get_ee_position()
+print(pos)  # [x, y, z]
+print(ori)  # [roll, pitch, yaw]
+```
+
+Simple pick and lift pattern:
+```python
+# Lower 20cm
+move_ee_delta([0.0, 0.0, -0.2])
+
+# Move forward 10cm
+move_ee_delta([0.1, 0.0, 0.0])
+
+# Lift 30cm
+move_ee_delta([0.0, 0.0, 0.3])
 ```
 
 #### Combined Control
@@ -127,34 +156,64 @@ set_arm_target_position(reach_config, verbose=True)
 Navigate and reach:
 ```python
 # Move base to location
-set_mobile_target_position([1.5, 0.5, 0])
+set_mobile_target_joint([1.5, 0.5, 0])
 
 # Extend arm to reach object
-set_arm_target_position([0, 0.3, 0, -1.2, 0, 1.5, 0.785])
+set_arm_target_joint([0, 0.3, 0, -1.2, 0, 1.5, 0.785])
+```
+
+Get current robot state:
+```python
+# Get mobile base position [x, y, theta]
+base_pos = get_mobile_joint_position()
+
+# Get arm joint angles [j1~j7]
+arm_pos = get_arm_joint_position()
+
+# Get end effector pose
+pos, ori = get_ee_position()
 ```
 
 ### Available Functions in Sandbox
 
 #### Mobile Base Control
-- `set_mobile_target_position(mobile_target_position, timeout=10.0, verbose=False)`
+- `get_mobile_joint_position()`
+  - **Returns**: List [x, y, theta] - current base position in meters and radians
+
+- `set_mobile_target_joint(mobile_target_position, timeout=10.0, verbose=False)`
   - `mobile_target_position`: List [x, y, theta] in meters and radians
   - `timeout`: Maximum wait time in seconds (default: 10.0, set 0 for non-blocking)
   - `verbose`: Print convergence progress (default: False)
   - **Convergence**: Position error < 0.1m, velocity < 0.05 m/s, stable for 5 frames
   - **Returns**: True if converged, False if timeout
 
-#### Arm Control
-- `set_arm_target_position(arm_target_position, timeout=10.0, verbose=False)`
+#### Arm Control (Joint Space)
+- `get_arm_joint_position()`
+  - **Returns**: List [j1~j7] - current joint angles in radians
+
+- `set_arm_target_joint(arm_target_position, timeout=10.0, verbose=False)`
   - `arm_target_position`: List [j1, j2, j3, j4, j5, j6, j7] in radians
   - `timeout`: Maximum wait time in seconds (default: 10.0, set 0 for non-blocking)
   - `verbose`: Print convergence progress (default: False)
   - **Convergence**: Joint error < 0.1 rad, velocity < 0.1 rad/s, stable for 5 frames
   - **Returns**: True if converged, False if timeout
 
+#### End Effector Control (Delta Movement)
+- `get_ee_position()`
+  - **Returns**: Tuple (position, orientation) where position=[x,y,z], orientation=[roll,pitch,yaw]
+
+- `move_ee_delta(delta_pos, timeout=10.0, verbose=False)`
+  - `delta_pos`: Relative movement [dx, dy, dz] in meters
+  - `timeout`: Maximum wait time in seconds (default: 10.0, set 0 for non-blocking)
+  - `verbose`: Print convergence progress (default: False)
+  - **Note**: Position only - no orientation control
+  - **Returns**: True if converged, False if timeout
+
 #### Utilities
 - `print()`: Print debug messages
 - `range()`, `float()`, `time`: Standard Python builtins
 - `PI`: Constant for π (3.14159...)
+- `RESULT`: Dictionary for storing return values from user code
 
 For complete API documentation, see [robot/code_knowledge.md](robot/code_knowledge.md)
 
@@ -164,7 +223,7 @@ For complete API documentation, see [robot/code_knowledge.md](robot/code_knowled
 with-robot-4th-lab/
 ├── robot/
 │   ├── main.py              # FastAPI server and threading orchestration
-│   ├── simulator.py         # MuJoCo simulator with PD controller
+│   ├── simulator.py         # MuJoCo simulator with PID controller
 │   ├── code_repository.py   # Sandboxed code execution layer
 │   ├── code_knowledge.md    # Mobile manipulator API documentation (LLM-ready)
 │   ├── ellmer_knowledge.md  # Kinova robot arm reference examples
@@ -180,14 +239,17 @@ with-robot-4th-lab/
 
 ## Architecture
 
-The system uses a three-layer architecture:
+The system uses a two-thread architecture:
 
-1. **simulator.py**: Core MuJoCo physics simulation with PD controller
+1. **Main Thread**: FastAPI uvicorn server handling HTTP requests with synchronous code execution
+2. **Simulator Thread**: MuJoCo physics simulation with 3D rendering
+
+**Execution Model**: Actions execute synchronously - each HTTP request blocks until code execution completes.
+
+**Component Layers**:
+1. **simulator.py**: Core MuJoCo physics simulation with PID controller (mobile base) and position controller (arm)
 2. **code_repository.py**: Sandboxed Python execution environment
-3. **main.py**: FastAPI server with three concurrent threads:
-   - Main thread: HTTP request handling
-   - Simulator thread: Physics simulation and 3D rendering
-   - Action processor thread: Asynchronous code execution
+3. **main.py**: FastAPI server orchestrating simulator and action execution
 
 ## Configuration
 
@@ -196,13 +258,15 @@ The system uses a three-layer architecture:
 Edit `robot/simulator.py` to adjust:
 
 ```python
-# PD controller gains
-KP = np.array([2.0, 2.0, 1.5])  # Position gains [x, y, theta]
-KD = np.array([0.5, 0.5, 0.3])  # Derivative gains [x, y, theta]
+# PID controller gains for mobile base
+MOBILE_KP = np.array([4.0, 4.0, 2.0])       # Position gains [x, y, theta]
+MOBILE_KI = np.array([0.3, 0.3, 0.15])      # Integral gains
+MOBILE_I_LIMIT = np.array([0.2, 0.2, 0.1])  # Integral limits
+MOBILE_KD = np.array([0.5, 0.5, 0.3])       # Derivative gains
 
 # Camera view settings
-CAM_LOOKAT = [2.15, -0.8, 0.8]
-CAM_DISTANCE = 5.0
+CAM_LOOKAT = [-0.8, -0.8, 0.8]
+CAM_DISTANCE = 7.5
 CAM_AZIMUTH = 135
 CAM_ELEVATION = -25
 ```
@@ -221,7 +285,7 @@ PORT = 8800       # API server port
 The robot model XML and scene assets are from the [RoboCasa](https://github.com/robocasa/robocasa) project. Change the MuJoCo model in `robot/simulator.py`:
 
 ```python
-# Line 40
+# Line 80
 xml_path = "../model/robocasa/panda_omron.xml"  # Default from RoboCasa
 ```
 
@@ -229,8 +293,9 @@ xml_path = "../model/robocasa/panda_omron.xml"  # Default from RoboCasa
 
 - **Physics Engine**: MuJoCo 3.3.7
 - **Control System**:
-  - PD controller for mobile base velocity tracking
+  - PID controller for mobile base velocity tracking
   - Position control for 7-DOF Panda arm
+  - Basic delta movement for end effector (no IK solver)
 - **Convergence Logic**:
   - Position + velocity stability checks
   - Adaptive sleep intervals (0.02s-0.1s based on error)
@@ -239,7 +304,7 @@ xml_path = "../model/robocasa/panda_omron.xml"  # Default from RoboCasa
   - Position control (kp=1000, kv=100) for Panda arm
   - Velocity control (kv=1000/1500) for mobile base
 - **Sensors**: Force/torque sensors on gripper end-effector
-- **Threading**: Daemon threads for clean shutdown
+- **Threading**: Two daemon threads for clean shutdown
 - **Safety**: Sandboxed code execution with restricted builtins
 
 ### Convergence Criteria
@@ -249,10 +314,24 @@ xml_path = "../model/robocasa/panda_omron.xml"  # Default from RoboCasa
 - Velocity norm < 0.05 m/s or rad/s
 - Stability: 5 consecutive frames within threshold
 
-**Arm:**
+**Arm (Joint Space):**
 - Joint position error norm < 0.1 radians
 - Joint velocity norm < 0.1 rad/s
 - Stability: 5 consecutive frames within threshold
+
+**End Effector (Delta Movement):**
+- Same as Arm joint convergence (error < 0.1 rad, velocity < 0.1 rad/s)
+- No IK solver - relative movement only
+- No orientation control
+
+## Current Limitations
+
+- **No IK solver**: Cannot command absolute end effector poses with orientation
+- **No gripper control**: Gripper functions not yet exposed to sandbox
+- **Synchronous execution only**: Cannot run multiple actions concurrently
+- **No object detection**: Vision/perception functions not available
+
+See [CLAUDE.md](CLAUDE.md) for development guidance on adding features like IK solver.
 
 ## License
 
