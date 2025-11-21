@@ -1,3 +1,0 @@
-
-
-mjpython ./robot/main.py
