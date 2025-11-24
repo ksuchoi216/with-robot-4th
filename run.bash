@@ -20,4 +20,5 @@ echo "Active conda environment: $CONDA_DEFAULT_ENV"
 
 # 4) Run the MuJoCo robot simulation server
 echo "Starting MuJoCo Robot Simulator API with robots: alice, mark..."
-mjpython ./robot/main.py --robots alice mark
+# mjpython ./robot/main.py --robots alice mark
+mjpython ./robot/main.py --robots alice

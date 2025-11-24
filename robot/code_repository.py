@@ -1,5 +1,6 @@
 """Sandboxed code execution layer with multi-robot fleet awareness."""
 
+import math
 import numpy as np
 
 from simulator import RobotFleet
@@ -317,6 +318,49 @@ def get_gripper_state(robot_name=None):
     return _require_fleet().get_gripper_state(robot_name=robot_name)
 
 
+def xy_to_base_pose(target_xy, robot_name=None, approach=0.35):
+    """
+    Convert a target (x, y) into a base pose (x, y, theta) that faces the point
+    and stands off by `approach` meters.
+
+    Returns:
+        dict with keys:
+            goal: absolute x, y, theta
+            relative: dx, dy, dtheta from current pose
+            distance_to_target: straight-line distance from current base to target
+    """
+    fleet = _require_fleet()
+    pose = fleet.get_robot_pose(robot_name)
+    cur = pose["current"]
+    tx = float(target_xy["x"])
+    ty = float(target_xy["y"])
+    cx = float(cur["x"])
+    cy = float(cur["y"])
+
+    vec = np.array([tx - cx, ty - cy], dtype=float)
+    dist = float(np.linalg.norm(vec))
+    if dist < 1e-9:
+        direction = np.array([1.0, 0.0], dtype=float)
+        heading = 0.0
+    else:
+        direction = vec / dist
+        heading = float(math.atan2(direction[1], direction[0]))
+
+    desired = np.array([tx, ty], dtype=float) - direction * float(approach)
+    goal = {"x": float(desired[0]), "y": float(desired[1]), "theta": heading}
+    relative = {
+        "dx": goal["x"] - cx,
+        "dy": goal["y"] - cy,
+        "dtheta": heading - float(cur["theta"]),
+    }
+    return {
+        "goal": goal,
+        "relative": relative,
+        "distance_to_target": dist,
+        "approach": float(approach),
+    }
+
+
 def exec_code(code):
     """
     Execute user code in sandboxed environment with robot control access.
@@ -344,6 +388,7 @@ def exec_code(code):
             * get_payload_state(robot_name=None)
             * predict_base_collision(robot_name=None, target=None, delta=None)
             * predict_arm_collision(robot_name=None, target=None, delta=None)
+            * xy_to_base_pose(target_xy, robot_name=None, approach=0.35)
             * set_arm_joint_positions(joint_positions, robot_name=None, wait=True, tolerance=0.01, timeout=10.0)
             * offset_arm_joint_positions(joint_deltas, robot_name=None, wait=True, tolerance=0.01, timeout=10.0)
             * get_arm_state(robot_name=None)
@@ -380,5 +425,6 @@ def exec_code(code):
         "open_gripper": open_gripper,
         "close_gripper": close_gripper,
         "get_gripper_state": get_gripper_state,
+        "xy_to_base_pose": xy_to_base_pose,
     }
     exec(code, safe_globals)

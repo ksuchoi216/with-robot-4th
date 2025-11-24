@@ -4,10 +4,12 @@ import math
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import dataclass
 
 import mujoco
 import mujoco.viewer
 import numpy as np
+from mjcf_multi import build_multi_robot_xml
 
 
 class RobotConfig:
@@ -96,6 +98,75 @@ class RobotConfig:
     GRIPPER_SAFE_WIDTH = 0.04
 
 
+@dataclass(frozen=True)
+class RobotNames:
+    """Resolved MJCF name bundle for a single robot."""
+
+    base_joints: list
+    base_actuators: list
+    arm_joints: list
+    arm_actuators: list
+    gripper_joints: list
+    gripper_actuators: list
+    torso_joint: str
+    torso_actuator: str
+    force_sensor: str
+    torque_sensor: str
+    eef_body: str
+    body_prefixes: tuple
+
+    @staticmethod
+    def for_index(idx: int) -> "RobotNames":
+        replace = lambda name: name.replace("0", str(idx))
+        return RobotNames(
+            base_joints=[replace(n) for n in RobotConfig.JOINT_NAMES],
+            base_actuators=[replace(n) for n in RobotConfig.ACTUATOR_NAMES],
+            arm_joints=[replace(n) for n in RobotConfig.ARM_JOINT_NAMES],
+            arm_actuators=[replace(n) for n in RobotConfig.ARM_ACTUATOR_NAMES],
+            gripper_joints=[replace(n) for n in RobotConfig.GRIPPER_JOINT_NAMES],
+            gripper_actuators=[
+                replace(n) for n in RobotConfig.GRIPPER_ACTUATOR_NAMES
+            ],
+            torso_joint=replace(RobotConfig.TORSO_JOINT_NAME),
+            torso_actuator=replace(RobotConfig.TORSO_ACTUATOR_NAME),
+            force_sensor=replace(RobotConfig.FORCE_SENSOR_NAME),
+            torque_sensor=replace(RobotConfig.TORQUE_SENSOR_NAME),
+            eef_body=replace(RobotConfig.EEF_BODY_NAME),
+            body_prefixes=tuple(
+                replace(prefix) for prefix in RobotConfig.ROBOT_BODY_PREFIXES
+            ),
+        )
+
+
+@dataclass
+class RobotHandles:
+    """Indexes, targets, and ids for a specific robot in the scene."""
+
+    name: str
+    names: RobotNames
+    base_joint_ids: list
+    base_qposadr: list
+    base_qveladr: list
+    base_actuator_ids: list
+    arm_joint_ids: list
+    arm_qposadr: list
+    arm_qveladr: list
+    arm_actuator_ids: list
+    gripper_joint_ids: list
+    gripper_qposadr: list
+    gripper_qveladr: list
+    gripper_actuator_ids: list
+    torso_joint_id: int
+    torso_qposadr: int
+    torso_actuator_id: int
+    force_sensor_id: int
+    torque_sensor_id: int
+    eef_body_id: int
+    base_target: np.ndarray
+    arm_target: np.ndarray
+    gripper_target: np.ndarray
+
+
 HANDLE_KEYWORDS = ("handle", "knob", "button", "lever", "switch", "pull", "grip")
 ACTION_KEYWORD_MAP = (
     ("door", "door"),
@@ -120,64 +191,106 @@ class MujocoSimulator:
     """MuJoCo simulator with PD-controlled mobile base position tracking."""
 
     # def __init__(self, xml_path="../model/robocasa/panda_omron.xml"):
-    def __init__(self, xml_path="../model/panda_omron/panda_omron.xml"):
+    def __init__(
+        self,
+        xml_path="../model/panda_omron/panda_omron.xml",
+        xml_string=None,
+        robot_names=None,
+    ):
         """Initialize simulator with MuJoCo model and control indices."""
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
+        self.model = (
+            mujoco.MjModel.from_xml_string(xml_string)
+            if xml_string is not None
+            else mujoco.MjModel.from_xml_path(xml_path)
+        )
         self.data = mujoco.MjData(self.model)
         self._ctrl_lock = threading.Lock()
-        self._target_position = RobotConfig.INITIAL_POSITION.copy()
 
-        # Resolve base joint / actuator indices
-        self.joint_ids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-            for name in RobotConfig.JOINT_NAMES
-        ]
-        self._base_joint_qposadr = [
-            self.model.jnt_qposadr[joint_id] for joint_id in self.joint_ids
-        ]
-        self._base_joint_qveladr = [
-            self.model.jnt_dofadr[joint_id] for joint_id in self.joint_ids
-        ]
-        self.actuator_ids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-            for name in RobotConfig.ACTUATOR_NAMES
-        ]
+        robot_names = robot_names or ["robot0"]
+        self.robot_names = list(robot_names)
+        self.default_robot = self.robot_names[0]
+        self._robot_handles = OrderedDict()
 
-        # Arm and gripper resources
-        (
-            self.arm_joint_ids,
-            self._arm_joint_qposadr,
-            self._arm_joint_qveladr,
-        ) = self._resolve_joint_group(RobotConfig.ARM_JOINT_NAMES)
-        self.arm_actuator_ids = self._resolve_actuator_ids(
-            RobotConfig.ARM_ACTUATOR_NAMES
-        )
-        (
-            self.gripper_joint_ids,
-            self._gripper_joint_qposadr,
-            self._gripper_joint_qveladr,
-        ) = self._resolve_joint_group(RobotConfig.GRIPPER_JOINT_NAMES)
-        self.gripper_actuator_ids = self._resolve_actuator_ids(
-            RobotConfig.GRIPPER_ACTUATOR_NAMES
-        )
-        self.torso_joint_id = self._resolve_joint_id(RobotConfig.TORSO_JOINT_NAME)
-        self._torso_joint_qposadr = (
-            self.model.jnt_qposadr[self.torso_joint_id]
-            if self.torso_joint_id is not None
-            else None
-        )
-        self.torso_actuator_id = self._resolve_actuator_id(
-            RobotConfig.TORSO_ACTUATOR_NAME
-        )
+        for idx, display_name in enumerate(self.robot_names):
+            names = RobotNames.for_index(idx)
+            base_joint_ids = [
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+                for name in names.base_joints
+            ]
+            base_qposadr = [self.model.jnt_qposadr[jid] for jid in base_joint_ids]
+            base_qveladr = [self.model.jnt_dofadr[jid] for jid in base_joint_ids]
+            base_actuator_ids = [
+                mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+                for name in names.base_actuators
+            ]
 
-        # Sensor handles
-        self.force_sensor_id = self._resolve_sensor_id(RobotConfig.FORCE_SENSOR_NAME)
-        self.torque_sensor_id = self._resolve_sensor_id(RobotConfig.TORQUE_SENSOR_NAME)
+            arm_joint_ids, arm_qposadr, arm_qveladr = self._resolve_joint_group(
+                names.arm_joints
+            )
+            arm_actuator_ids = self._resolve_actuator_ids(names.arm_actuators)
 
-        # Initialize control targets
-        self._arm_target = self.get_arm_joint_positions()
-        self._gripper_target = self.get_gripper_joint_positions()
-        self.eef_body_id = self._resolve_body_id(RobotConfig.EEF_BODY_NAME)
+            gripper_joint_ids, gripper_qposadr, gripper_qveladr = (
+                self._resolve_joint_group(names.gripper_joints)
+            )
+            gripper_actuator_ids = self._resolve_actuator_ids(
+                names.gripper_actuators
+            )
+
+            torso_joint_id = self._resolve_joint_id(names.torso_joint)
+            torso_qposadr = (
+                self.model.jnt_qposadr[torso_joint_id]
+                if torso_joint_id is not None
+                else None
+            )
+            torso_actuator_id = self._resolve_actuator_id(names.torso_actuator)
+
+            force_sensor_id = self._resolve_sensor_id(names.force_sensor)
+            torque_sensor_id = self._resolve_sensor_id(names.torque_sensor)
+            eef_body_id = self._resolve_body_id(names.eef_body)
+
+            arm_target = np.array(
+                [self.data.qpos[idx] for idx in arm_qposadr], dtype=float
+            )
+            gripper_target = np.array(
+                [self.data.qpos[idx] for idx in gripper_qposadr], dtype=float
+            )
+            base_target = RobotConfig.INITIAL_POSITION.copy()
+
+            handle = RobotHandles(
+                name=display_name,
+                names=names,
+                base_joint_ids=base_joint_ids,
+                base_qposadr=base_qposadr,
+                base_qveladr=base_qveladr,
+                base_actuator_ids=base_actuator_ids,
+                arm_joint_ids=arm_joint_ids,
+                arm_qposadr=arm_qposadr,
+                arm_qveladr=arm_qveladr,
+                arm_actuator_ids=arm_actuator_ids,
+                gripper_joint_ids=gripper_joint_ids,
+                gripper_qposadr=gripper_qposadr,
+                gripper_qveladr=gripper_qveladr,
+                gripper_actuator_ids=gripper_actuator_ids,
+                torso_joint_id=torso_joint_id,
+                torso_qposadr=torso_qposadr,
+                torso_actuator_id=torso_actuator_id,
+                force_sensor_id=force_sensor_id,
+                torque_sensor_id=torque_sensor_id,
+                eef_body_id=eef_body_id,
+                base_target=base_target,
+                arm_target=arm_target,
+                gripper_target=gripper_target,
+            )
+            self._robot_handles[display_name] = handle
+
+        # Store prefixes for robot filtering
+        prefixes = []
+        for handle in self._robot_handles.values():
+            prefixes.extend(handle.names.body_prefixes)
+        self._robot_body_prefixes = tuple(sorted(set(prefixes)))
+
+        # Set default active robot aliases for single-robot helpers
+        self._use_robot(self.default_robot)
 
         # Precompute model metadata
         self.body_names = [
@@ -201,23 +314,41 @@ class MujocoSimulator:
         self._interactive_joints = []
         self._build_interaction_index()
 
-    def get_target_position(self):
+    def get_target_position(self, robot_name=None):
         """Get current target position [x, y, theta]."""
+        self._use_robot(robot_name)
         with self._ctrl_lock:
             return self._target_position.copy()
 
-    def set_target_position(self, x, y, theta):
+    def set_target_position(self, x, y, theta, robot_name=None):
         """
         Set target position [x, y, theta] in meters and radians.
         """
+        handle = self._use_robot(robot_name)
+        target = np.array([x, y, theta], dtype=float)
         with self._ctrl_lock:
-            self._target_position = np.array([x, y, theta], dtype=float)
+            self._target_position = target
+            handle.base_target = target
+
+    def set_base_pose(self, x, y, theta, robot_name=None):
+        """Teleport the base to a pose and set target accordingly."""
+        handle = self._use_robot(robot_name)
+        with self._ctrl_lock:
+            self.data.qpos[handle.base_qposadr[0]] = float(x)
+            self.data.qpos[handle.base_qposadr[1]] = float(y)
+            self.data.qpos[handle.base_qposadr[2]] = float(theta)
+            for addr in handle.base_qveladr:
+                self.data.qvel[addr] = 0.0
+            target = np.array([x, y, theta], dtype=float)
+            self._target_position = target
+            handle.base_target = target
 
     def wait_for_base_position(
         self,
         tolerance=0.1,
         theta_weight=0.5,
         timeout=20.0,
+        robot_name=None,
     ):
         """
         Block until the base reaches its target pose within tolerance.
@@ -230,9 +361,10 @@ class MujocoSimulator:
         Returns:
             bool: True when target reached, False if timeout expired.
         """
+        self._use_robot(robot_name)
         start = time.time()
         while time.time() - start < timeout:
-            diff = self.get_position_diff()
+            diff = self.get_position_diff(robot_name=robot_name)
             diff = diff.copy()
             diff[2] *= theta_weight
             if np.linalg.norm(diff) <= tolerance:
@@ -249,6 +381,7 @@ class MujocoSimulator:
         tolerance=0.1,
         theta_weight=0.5,
         timeout=20.0,
+        robot_name=None,
     ):
         """
         Command the base to shift relative to its current pose.
@@ -259,17 +392,21 @@ class MujocoSimulator:
             dtheta: Delta yaw (radians).
             wait, tolerance, theta_weight, timeout: Same as wait_for_base_position.
         """
-        current = self.get_current_position()
+        current = self.get_current_position(robot_name=robot_name)
         target = current + np.array([dx, dy, dtheta], dtype=float)
-        self.set_target_position(*target)
+        self.set_target_position(*target, robot_name=robot_name)
         if not wait:
             return True
         return self.wait_for_base_position(
-            tolerance=tolerance, theta_weight=theta_weight, timeout=timeout
+            tolerance=tolerance,
+            theta_weight=theta_weight,
+            timeout=timeout,
+            robot_name=robot_name,
         )
 
-    def get_current_position(self):
+    def get_current_position(self, robot_name=None):
         """Get current position [x, y, theta] from joint states."""
+        self._use_robot(robot_name)
         return np.array(
             [
                 self.data.qpos[self._base_joint_qposadr[0]],
@@ -278,12 +415,15 @@ class MujocoSimulator:
             ]
         )
 
-    def get_position_diff(self):
+    def get_position_diff(self, robot_name=None):
         """Get position error [delta_x, delta_y, delta_theta] between target and current position."""
-        return self.get_target_position() - self.get_current_position()
+        return self.get_target_position(robot_name=robot_name) - self.get_current_position(
+            robot_name=robot_name
+        )
 
-    def get_current_velocity(self):
+    def get_current_velocity(self, robot_name=None):
         """Get current velocity [vx, vy, omega] from joint velocities."""
+        self._use_robot(robot_name)
         return np.array(
             [
                 self.data.qvel[self._base_joint_qveladr[0]],
@@ -292,11 +432,12 @@ class MujocoSimulator:
             ]
         )
 
-    def get_robot_pose(self):
+    def get_robot_pose(self, robot_name=None):
         """Return dict with current robot pose and commanded target."""
-        current = self.get_current_position()
-        target = self.get_target_position()
-        velocity = self.get_current_velocity()
+        self._use_robot(robot_name)
+        current = self.get_current_position(robot_name=robot_name)
+        target = self.get_target_position(robot_name=robot_name)
+        velocity = self.get_current_velocity(robot_name=robot_name)
         theta_error = np.arctan2(
             np.sin(target[2] - current[2]), np.cos(target[2] - current[2])
         )
@@ -336,11 +477,41 @@ class MujocoSimulator:
             return None
         return float(self.data.qpos[self._torso_joint_qposadr])
 
+    def _use_robot(self, robot_name=None) -> RobotHandles:
+        """Switch active robot context for subsequent operations."""
+        name = robot_name or self.default_robot
+        if name not in self._robot_handles:
+            raise ValueError(
+                f"Unknown robot '{name}'. Available: {list(self._robot_handles)}"
+            )
+        handle = self._robot_handles[name]
+        self.joint_ids = handle.base_joint_ids
+        self._base_joint_qposadr = handle.base_qposadr
+        self._base_joint_qveladr = handle.base_qveladr
+        self.actuator_ids = handle.base_actuator_ids
+        self.arm_joint_ids = handle.arm_joint_ids
+        self._arm_joint_qposadr = handle.arm_qposadr
+        self._arm_joint_qveladr = handle.arm_qveladr
+        self.arm_actuator_ids = handle.arm_actuator_ids
+        self.gripper_joint_ids = handle.gripper_joint_ids
+        self._gripper_joint_qposadr = handle.gripper_qposadr
+        self._gripper_joint_qveladr = handle.gripper_qveladr
+        self.gripper_actuator_ids = handle.gripper_actuator_ids
+        self.torso_joint_id = handle.torso_joint_id
+        self._torso_joint_qposadr = handle.torso_qposadr
+        self.torso_actuator_id = handle.torso_actuator_id
+        self.force_sensor_id = handle.force_sensor_id
+        self.torque_sensor_id = handle.torque_sensor_id
+        self.eef_body_id = handle.eef_body_id
+        self._target_position = handle.base_target
+        self._arm_target = handle.arm_target
+        self._gripper_target = handle.gripper_target
+        self._active_robot = name
+        return handle
+
     def _is_robot_body(self, name: str) -> bool:
         """Return True if body belongs to the robot."""
-        return any(
-            name.startswith(prefix) for prefix in RobotConfig.ROBOT_BODY_PREFIXES
-        )
+        return any(name.startswith(prefix) for prefix in self._robot_body_prefixes)
 
     def _resolve_body_id(self, name: str):
         """Resolve body name to MuJoCo id, returning None if missing."""
@@ -882,28 +1053,33 @@ class MujocoSimulator:
             "yaw": self._quat_to_yaw(quat),
         }
 
-    def get_end_effector_pose(self):
+    def get_end_effector_pose(self, robot_name=None):
         """Return pose dict for the right gripper end effector."""
+        self._use_robot(robot_name)
         if self.eef_body_id is None:
             return None
         return self._body_pose_dict(self.eef_body_id)
 
-    def get_arm_joint_positions(self):
+    def get_arm_joint_positions(self, robot_name=None):
         """Return current arm joint angles as numpy array."""
+        self._use_robot(robot_name)
         return np.array(
             [self.data.qpos[idx] for idx in self._arm_joint_qposadr], dtype=float
         )
 
-    def get_arm_joint_velocities(self):
+    def get_arm_joint_velocities(self, robot_name=None):
         """Return current arm joint velocities."""
+        self._use_robot(robot_name)
         return np.array(
             [self.data.qvel[idx] for idx in self._arm_joint_qveladr], dtype=float
         )
 
-    def get_arm_state(self):
+    def get_arm_state(self, robot_name=None):
         """Return structured information about the arm joints and end-effector."""
+        self._use_robot(robot_name)
+        arm_joint_names = [self.joint_names[jid] for jid in self.arm_joint_ids]
         joints = self._joint_state_list(
-            RobotConfig.ARM_JOINT_NAMES,
+            arm_joint_names,
             self._arm_joint_qposadr,
             self._arm_joint_qveladr,
             self.arm_joint_ids,
@@ -914,10 +1090,20 @@ class MujocoSimulator:
             "joints": joints,
             "target": [float(v) for v in target],
         }
-        eef_pose = self.get_end_effector_pose()
+        eef_pose = self.get_end_effector_pose(robot_name=robot_name)
         if eef_pose is not None:
             state["end_effector"] = eef_pose
         return state
+
+    def get_arm_limits(self, robot_name=None):
+        """Return joint limit ranges for the arm."""
+        self._use_robot(robot_name)
+        arm_joint_names = [self.joint_names[jid] for jid in self.arm_joint_ids]
+        limits = []
+        for name, joint_id in zip(arm_joint_names, self.arm_joint_ids):
+            low, high = self.model.jnt_range[joint_id]
+            limits.append({"name": name, "range": [float(low), float(high)]})
+        return limits
 
     def set_arm_joint_positions(
         self,
@@ -925,6 +1111,7 @@ class MujocoSimulator:
         wait=True,
         tolerance=0.01,
         timeout=10.0,
+        robot_name=None,
     ):
         """
         Command the seven arm joints to specific positions.
@@ -937,16 +1124,18 @@ class MujocoSimulator:
         Returns:
             bool: True if target reached (or wait=False). False when timed out.
         """
+        handle = self._use_robot(robot_name)
         targets = self._clip_ctrl_to_range(self.arm_actuator_ids, joint_positions)
         with self._ctrl_lock:
             self._arm_target = targets.copy()
+            handle.arm_target = targets.copy()
 
         if not wait:
             return True
 
         start = time.time()
         while time.time() - start < timeout:
-            current = self.get_arm_joint_positions()
+            current = self.get_arm_joint_positions(robot_name=robot_name)
             if np.max(np.abs(current - targets)) <= tolerance:
                 return True
             time.sleep(0.01)
@@ -958,6 +1147,7 @@ class MujocoSimulator:
         wait=True,
         tolerance=0.01,
         timeout=10.0,
+        robot_name=None,
     ):
         """
         Apply relative joint deltas to the Panda arm.
@@ -966,7 +1156,7 @@ class MujocoSimulator:
             joint_deltas: Iterable of 7 offsets (radians). Use None/0 for no change.
             wait/tolerance/timeout: Same semantics as set_arm_joint_positions.
         """
-        current = self.get_arm_joint_positions()
+        current = self.get_arm_joint_positions(robot_name=robot_name)
         deltas = np.array(
             [
                 0.0 if delta is None else float(delta)
@@ -977,33 +1167,41 @@ class MujocoSimulator:
         if deltas.shape[0] != current.shape[0]:
             raise ValueError(
                 f"Expected {current.shape[0]} deltas, received {deltas.shape[0]}"
-            )
+        )
         target = current + deltas
         return self.set_arm_joint_positions(
-            target, wait=wait, tolerance=tolerance, timeout=timeout
+            target,
+            wait=wait,
+            tolerance=tolerance,
+            timeout=timeout,
+            robot_name=robot_name,
         )
 
-    def get_gripper_joint_positions(self):
+    def get_gripper_joint_positions(self, robot_name=None):
         """Return current positions of the gripper finger joints."""
+        self._use_robot(robot_name)
         return np.array(
             [self.data.qpos[idx] for idx in self._gripper_joint_qposadr], dtype=float
         )
 
-    def get_gripper_joint_velocities(self):
+    def get_gripper_joint_velocities(self, robot_name=None):
         """Return gripper joint velocities."""
+        self._use_robot(robot_name)
         return np.array(
             [self.data.qvel[idx] for idx in self._gripper_joint_qveladr], dtype=float
         )
 
-    def get_gripper_opening(self):
+    def get_gripper_opening(self, robot_name=None):
         """Return gripper opening width (meters)."""
-        joints = self.get_gripper_joint_positions()
+        joints = self.get_gripper_joint_positions(robot_name=robot_name)
         return float(joints[0] - joints[1])
 
-    def get_gripper_state(self):
+    def get_gripper_state(self, robot_name=None):
         """Return joint / wrench data for the gripper."""
+        self._use_robot(robot_name)
+        gripper_joint_names = [self.joint_names[jid] for jid in self.gripper_joint_ids]
         joints = self._joint_state_list(
-            RobotConfig.GRIPPER_JOINT_NAMES,
+            gripper_joint_names,
             self._gripper_joint_qposadr,
             self._gripper_joint_qveladr,
             self.gripper_joint_ids,
@@ -1011,7 +1209,7 @@ class MujocoSimulator:
         with self._ctrl_lock:
             target = self._gripper_target.copy()
         state = {
-            "width": self.get_gripper_opening(),
+            "width": self.get_gripper_opening(robot_name=robot_name),
             "target": [float(v) for v in target],
             "joints": joints,
         }
@@ -1026,12 +1224,29 @@ class MujocoSimulator:
             state["wrench"] = wrench
         return state
 
+    def get_gripper_limits(self, robot_name=None):
+        """Return actuator control limits and derived width limits."""
+        self._use_robot(robot_name)
+        actuator_limits = []
+        for actuator_id in self.gripper_actuator_ids:
+            name = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_id
+            )
+            low, high = self.model.actuator_ctrlrange[actuator_id]
+            actuator_limits.append({"name": name, "range": [float(low), float(high)]})
+        # Width limits derived from opposing finger motion
+        return {
+            "actuator_limits": actuator_limits,
+            "width_range": [0.0, float(RobotConfig.GRIPPER_MAX_WIDTH)],
+        }
+
     def set_gripper_opening(
         self,
         width,
         wait=True,
         tolerance=1e-3,
         timeout=5.0,
+        robot_name=None,
     ):
         """
         Command gripper opening width in meters.
@@ -1040,8 +1255,9 @@ class MujocoSimulator:
             width: Desired opening in meters (0.0 = closed).
             wait: When True, block until reached within tolerance.
             tolerance: Allowable error on the opening width.
-            timeout: Seconds to wait (when wait=True).
+        timeout: Seconds to wait (when wait=True).
         """
+        handle = self._use_robot(robot_name)
         clamped = float(np.clip(width, 0.0, RobotConfig.GRIPPER_MAX_WIDTH))
         half = clamped / 2.0
         targets = self._clip_ctrl_to_range(
@@ -1050,13 +1266,14 @@ class MujocoSimulator:
 
         with self._ctrl_lock:
             self._gripper_target = targets.copy()
+            handle.gripper_target = targets.copy()
 
         if not wait:
             return True
 
         start = time.time()
         while time.time() - start < timeout:
-            if abs(self.get_gripper_opening() - clamped) <= tolerance:
+            if abs(self.get_gripper_opening(robot_name=robot_name) - clamped) <= tolerance:
                 return True
             time.sleep(0.01)
         return False
@@ -1067,6 +1284,7 @@ class MujocoSimulator:
         wait=True,
         tolerance=1e-3,
         timeout=5.0,
+        robot_name=None,
     ):
         """
         Adjust gripper width relative to current opening.
@@ -1074,32 +1292,42 @@ class MujocoSimulator:
         Args:
             width_delta: Positive opens, negative closes (meters).
         """
-        current = self.get_gripper_opening()
+        current = self.get_gripper_opening(robot_name=robot_name)
         target = current + float(width_delta)
         return self.set_gripper_opening(
-            target, wait=wait, tolerance=tolerance, timeout=timeout
+            target,
+            wait=wait,
+            tolerance=tolerance,
+            timeout=timeout,
+            robot_name=robot_name,
         )
 
-    def open_gripper(self, wait=True, tolerance=1e-3, timeout=5.0):
+    def open_gripper(self, wait=True, tolerance=1e-3, timeout=5.0, robot_name=None):
         """Convenience helper to fully open the gripper."""
         return self.set_gripper_opening(
             RobotConfig.GRIPPER_MAX_WIDTH,
             wait=wait,
             tolerance=tolerance,
             timeout=timeout,
+            robot_name=robot_name,
         )
 
-    def close_gripper(self, wait=True, tolerance=1e-3, timeout=5.0):
+    def close_gripper(self, wait=True, tolerance=1e-3, timeout=5.0, robot_name=None):
         """Convenience helper to close the gripper."""
         return self.set_gripper_opening(
-            0.0, wait=wait, tolerance=tolerance, timeout=timeout
+            0.0,
+            wait=wait,
+            tolerance=tolerance,
+            timeout=timeout,
+            robot_name=robot_name,
         )
 
-    def _compute_control(self):
+    def _compute_control(self, robot_name=None):
         """Compute PD control commands [vx, vy, omega] to reach target."""
-        target_pos = self.get_target_position()
-        current_pos = self.get_current_position()
-        current_vel = self.get_current_velocity()
+        self._use_robot(robot_name)
+        target_pos = self.get_target_position(robot_name=robot_name)
+        current_pos = self.get_current_position(robot_name=robot_name)
+        current_vel = self.get_current_velocity(robot_name=robot_name)
 
         pos_error = target_pos - current_pos
         pos_error[2] = np.arctan2(
@@ -1131,19 +1359,20 @@ class MujocoSimulator:
             # Main loop
             while v.is_running():
                 self._apply_scene_updates()
-                control = self._compute_control()
-                with self._ctrl_lock:
-                    arm_targets = self._arm_target.copy()
-                    gripper_targets = self._gripper_target.copy()
+                for name, handle in self._robot_handles.items():
+                    control = self._compute_control(robot_name=name)
+                    with self._ctrl_lock:
+                        arm_targets = handle.arm_target.copy()
+                        gripper_targets = handle.gripper_target.copy()
 
-                for actuator_id, value in zip(self.actuator_ids, control):
-                    self.data.ctrl[actuator_id] = value
-                for actuator_id, value in zip(self.arm_actuator_ids, arm_targets):
-                    self.data.ctrl[actuator_id] = value
-                for actuator_id, value in zip(
-                    self.gripper_actuator_ids, gripper_targets
-                ):
-                    self.data.ctrl[actuator_id] = value
+                    for actuator_id, value in zip(handle.base_actuator_ids, control):
+                        self.data.ctrl[actuator_id] = value
+                    for actuator_id, value in zip(handle.arm_actuator_ids, arm_targets):
+                        self.data.ctrl[actuator_id] = value
+                    for actuator_id, value in zip(
+                        handle.gripper_actuator_ids, gripper_targets
+                    ):
+                        self.data.ctrl[actuator_id] = value
                 mujoco.mj_step(self.model, self.data)
                 v.sync()
 
@@ -1153,23 +1382,41 @@ class RobotFleet:
 
     MIN_BASE_SEPARATION = RobotConfig.BASE_BOUNDING_RADIUS * 2 + 0.2
 
-    def __init__(self, robot_specs):
+    def __init__(self, robot_specs, shared_scene=True):
         """
         Args:
             robot_specs: Iterable of dicts with "name" and "xml_path" keys.
         """
         if not robot_specs:
             raise ValueError("At least one robot specification is required.")
-        self.robots = OrderedDict()
-        for idx, spec in enumerate(robot_specs):
-            name = spec.get("name") or f"robot{idx}"
-            if name in self.robots:
-                raise ValueError(f"Duplicate robot name '{name}' detected.")
-            xml_path = spec.get("xml_path")
-            sim = MujocoSimulator(xml_path=xml_path)
-            self.robots[name] = sim
-        self.default_robot = next(iter(self.robots))
+        self.shared_scene = shared_scene and len(robot_specs) > 1
         self._sim_threads = []
+
+        if self.shared_scene:
+            names = []
+            for idx, spec in enumerate(robot_specs):
+                name = spec.get("name") or f"robot{idx}"
+                if name in names:
+                    raise ValueError(f"Duplicate robot name '{name}' detected.")
+                names.append(name)
+            xml_path = robot_specs[0].get("xml_path")
+            merged_xml = build_multi_robot_xml(xml_path, len(names))
+            self.sim = MujocoSimulator(
+                xml_path=xml_path, xml_string=merged_xml, robot_names=names
+            )
+            self.robots = OrderedDict((name, self.sim) for name in names)
+            self.default_robot = names[0]
+        else:
+            self.robots = OrderedDict()
+            for idx, spec in enumerate(robot_specs):
+                name = spec.get("name") or f"robot{idx}"
+                if name in self.robots:
+                    raise ValueError(f"Duplicate robot name '{name}' detected.")
+                xml_path = spec.get("xml_path")
+                sim = MujocoSimulator(xml_path=xml_path, robot_names=[name])
+                self.robots[name] = sim
+            self.default_robot = next(iter(self.robots))
+
         self._payload_state = {name: False for name in self.robots}
 
     def get_robot_names(self):
@@ -1182,26 +1429,52 @@ class RobotFleet:
         return name, self.robots[name]
 
     def _primary_simulator(self):
+        if self.shared_scene:
+            return self.sim
         return next(iter(self.robots.values()))
+
+    def set_base_pose(self, robot_name, x, y, theta):
+        """Teleport a robot to a starting pose and align its target."""
+        name, sim = self._get_simulator(robot_name)
+        sim.set_base_pose(x, y, theta, robot_name=name)
+
+    def set_base_poses(self, pose_map):
+        """Teleport multiple robots given a {name: (x, y, theta)} dict."""
+        for name, pose in pose_map.items():
+            if len(pose) != 3:
+                raise ValueError(f"Pose for '{name}' must be (x, y, theta)")
+            self.set_base_pose(name, pose[0], pose[1], pose[2])
 
     def start_simulators(self):
         """Launch a simulation thread per robot."""
-        for name, sim in self.robots.items():
+        if self.shared_scene:
             thread = threading.Thread(
-                target=sim.run,
+                target=self.sim.run,
                 daemon=True,
-                name=f"simulator-{name}",
+                name="simulator-shared",
             )
             thread.start()
             self._sim_threads.append(thread)
+        else:
+            for name, sim in self.robots.items():
+                thread = threading.Thread(
+                    target=sim.run,
+                    daemon=True,
+                    name=f"simulator-{name}",
+                )
+                thread.start()
+                self._sim_threads.append(thread)
 
     def _check_base_clearance(self, robot_name, target):
         """Ensure the requested target does not collide with other robots."""
         target_xy = np.array(target[:2], dtype=float)
-        for other_name, other_sim in self.robots.items():
+        for other_name in self.get_robot_names():
             if other_name == robot_name:
                 continue
-            other_target = other_sim.get_target_position()
+            if self.shared_scene:
+                other_target = self.sim.get_target_position(robot_name=other_name)
+            else:
+                other_target = self.robots[other_name].get_target_position()
             other_xy = other_target[:2]
             dist = np.linalg.norm(target_xy - other_xy)
             if dist < self.MIN_BASE_SEPARATION:
@@ -1224,11 +1497,14 @@ class RobotFleet:
         name, sim = self._get_simulator(robot_name)
         target = np.array([x, y, theta], dtype=float)
         self._check_base_clearance(name, target)
-        sim.set_target_position(*target)
+        sim.set_target_position(*target, robot_name=name)
         if not wait:
             return True
         return sim.wait_for_base_position(
-            tolerance=tolerance, theta_weight=theta_weight, timeout=timeout
+            tolerance=tolerance,
+            theta_weight=theta_weight,
+            timeout=timeout,
+            robot_name=name,
         )
 
     def offset_target_position(
@@ -1243,27 +1519,31 @@ class RobotFleet:
         timeout=20.0,
     ):
         name, sim = self._get_simulator(robot_name)
-        current = sim.get_current_position()
+        current = sim.get_current_position(robot_name=name)
         target = current + np.array([dx, dy, dtheta], dtype=float)
         self._check_base_clearance(name, target)
-        sim.set_target_position(*target)
+        sim.set_target_position(*target, robot_name=name)
         if not wait:
             return True
         return sim.wait_for_base_position(
-            tolerance=tolerance, theta_weight=theta_weight, timeout=timeout
+            tolerance=tolerance,
+            theta_weight=theta_weight,
+            timeout=timeout,
+            robot_name=name,
         )
 
     def get_robot_pose(self, robot_name=None, include_other=False):
         name, sim = self._get_simulator(robot_name)
-        pose = sim.get_robot_pose()
+        pose = sim.get_robot_pose(robot_name=name)
         pose["robot_name"] = name
         pose["bounding_radius"] = RobotConfig.BASE_BOUNDING_RADIUS
         if include_other:
             others = []
-            for other_name, other_sim in self.robots.items():
+            for other_name in self.get_robot_names():
                 if other_name == name:
                     continue
-                other_pose = other_sim.get_robot_pose()
+                other_sim = self.robots[other_name]
+                other_pose = other_sim.get_robot_pose(robot_name=other_name)
                 other_pose["robot_name"] = other_name
                 other_pose["bounding_radius"] = RobotConfig.BASE_BOUNDING_RADIUS
                 others.append(other_pose)
@@ -1323,12 +1603,13 @@ class RobotFleet:
         tolerance=0.01,
         timeout=10.0,
     ):
-        _, sim = self._get_simulator(robot_name)
+        name, sim = self._get_simulator(robot_name)
         return sim.set_arm_joint_positions(
             joint_positions,
             wait=wait,
             tolerance=tolerance,
             timeout=timeout,
+            robot_name=name,
         )
 
     def offset_arm_joint_positions(
@@ -1339,19 +1620,24 @@ class RobotFleet:
         tolerance=0.01,
         timeout=10.0,
     ):
-        _, sim = self._get_simulator(robot_name)
+        name, sim = self._get_simulator(robot_name)
         return sim.offset_arm_joint_positions(
             joint_deltas,
             wait=wait,
             tolerance=tolerance,
             timeout=timeout,
+            robot_name=name,
         )
 
     def get_arm_state(self, robot_name=None):
-        _, sim = self._get_simulator(robot_name)
-        state = sim.get_arm_state()
-        state["robot_name"] = robot_name or self.default_robot
+        name, sim = self._get_simulator(robot_name)
+        state = sim.get_arm_state(robot_name=name)
+        state["robot_name"] = name
         return state
+
+    def get_arm_limits(self, robot_name=None):
+        name, sim = self._get_simulator(robot_name)
+        return {"robot_name": name, "limits": sim.get_arm_limits(robot_name=name)}
 
     def set_gripper_opening(
         self,
@@ -1361,12 +1647,13 @@ class RobotFleet:
         tolerance=1e-3,
         timeout=5.0,
     ):
-        _, sim = self._get_simulator(robot_name)
+        name, sim = self._get_simulator(robot_name)
         return sim.set_gripper_opening(
             width,
             wait=wait,
             tolerance=tolerance,
             timeout=timeout,
+            robot_name=name,
         )
 
     def change_gripper_opening(
@@ -1377,28 +1664,39 @@ class RobotFleet:
         tolerance=1e-3,
         timeout=5.0,
     ):
-        _, sim = self._get_simulator(robot_name)
+        name, sim = self._get_simulator(robot_name)
         return sim.change_gripper_opening(
             width_delta,
             wait=wait,
             tolerance=tolerance,
             timeout=timeout,
+            robot_name=name,
         )
 
     def open_gripper(self, robot_name=None, wait=True, tolerance=1e-3, timeout=5.0):
-        _, sim = self._get_simulator(robot_name)
-        return sim.open_gripper(wait=wait, tolerance=tolerance, timeout=timeout)
+        name, sim = self._get_simulator(robot_name)
+        return sim.open_gripper(
+            wait=wait, tolerance=tolerance, timeout=timeout, robot_name=name
+        )
 
     def close_gripper(self, robot_name=None, wait=True, tolerance=1e-3, timeout=5.0):
-        _, sim = self._get_simulator(robot_name)
-        return sim.close_gripper(wait=wait, tolerance=tolerance, timeout=timeout)
+        name, sim = self._get_simulator(robot_name)
+        return sim.close_gripper(
+            wait=wait, tolerance=tolerance, timeout=timeout, robot_name=name
+        )
 
     def get_gripper_state(self, robot_name=None):
         name, sim = self._get_simulator(robot_name)
-        state = sim.get_gripper_state()
+        state = sim.get_gripper_state(robot_name=name)
         state["robot_name"] = name
         state["holding_object"] = self._payload_state.get(name, False)
         return state
+
+    def get_gripper_limits(self, robot_name=None):
+        name, sim = self._get_simulator(robot_name)
+        limits = sim.get_gripper_limits(robot_name=name)
+        limits["robot_name"] = name
+        return limits
 
     def get_payload_state(self, robot_name=None):
         name, _ = self._get_simulator(robot_name)
@@ -1503,7 +1801,7 @@ class RobotFleet:
     ):
         """Move a robot to a target pose while checking for static obstacles."""
         name, sim = self._get_simulator(robot_name)
-        start_pose = sim.get_current_position()
+        start_pose = sim.get_current_position(robot_name=name)
         target_pose = np.array([x, y, theta], dtype=float)
         self._check_base_clearance(name, target_pose)
 
@@ -1536,6 +1834,49 @@ class RobotFleet:
                 "x": float(target_pose[0]),
                 "y": float(target_pose[1]),
                 "theta": float(target_pose[2]),
+            },
+            "wait": wait,
+        }
+
+    def auto_position_to_object(
+        self,
+        robot_name,
+        object_name,
+        wait=True,
+        tolerance=0.1,
+    ):
+        """Move a robot near a named object, facing it."""
+        name, sim = self._get_simulator(robot_name)
+        obj = self._find_object_pose(object_name)
+        if obj is None:
+            raise ValueError(f"Object '{object_name}' not found in the environment.")
+        obj_pos = obj["position"]
+        obj_xy = np.array([obj_pos["x"], obj_pos["y"]], dtype=float)
+        pose = self.get_robot_pose(name)
+        current_xy = np.array(
+            [pose["current"]["x"], pose["current"]["y"]], dtype=float
+        )
+        desired_xy, relative, heading, dist = self._recommend_base_adjustment(
+            current_xy, obj_xy
+        )
+        target = np.array([desired_xy[0], desired_xy[1], heading], dtype=float)
+        self._check_base_clearance(name, target)
+        reached = self.set_target_position(
+            target[0],
+            target[1],
+            target[2],
+            robot_name=name,
+            wait=wait,
+            tolerance=tolerance,
+        )
+        return {
+            "success": bool(reached),
+            "robot_name": name,
+            "object": obj["name"],
+            "target": {
+                "x": float(target[0]),
+                "y": float(target[1]),
+                "theta": float(target[2]),
             },
             "wait": wait,
         }
@@ -1694,6 +2035,14 @@ class RobotFleet:
             },
         }
 
+    def auto_place_to_object(self, robot_name, object_name):
+        """Place near a named object by moving to its XY and performing place routine."""
+        obj = self._find_object_pose(object_name)
+        if obj is None:
+            raise ValueError(f"Object '{object_name}' not found in the environment.")
+        target = {"x": obj["position"]["x"], "y": obj["position"]["y"], "theta": obj.get("yaw")}
+        return self.auto_place(robot_name=robot_name, target=target)
+
     @staticmethod
     def _compose_target_pose(start_pose, target=None, delta=None):
         if target is not None:
@@ -1819,47 +2168,13 @@ class RobotFleet:
         }
 
     def auto_move_to_object(self, robot_name, object_name):
-        """Move robot close enough to interact with an object."""
-        name, _ = self._get_simulator(robot_name)
-        obj = self._find_object_pose(object_name)
-        if obj is None:
-            raise ValueError(f"Object '{object_name}' not found.")
-        obj_pos = obj["position"]
-        pose = self.get_robot_pose(name)
-        current_xy = np.array(
-            [pose["current"]["x"], pose["current"]["y"]], dtype=float
-        )
-        obj_xy = np.array([obj_pos["x"], obj_pos["y"]], dtype=float)
-        desired_xy, relative, heading, dist = self._recommend_base_adjustment(
-            current_xy, obj_xy
-        )
-        if dist > RobotConfig.ARM_REACH_RADIUS:
-            return {
-                "success": False,
-                "reason": "out_of_reach",
-                "robot_name": name,
-                "object": obj["name"],
-                "recommended_absolute": {
-                    "x": float(desired_xy[0]),
-                    "y": float(desired_xy[1]),
-                    "theta": float(heading),
-                },
-                "recommended_relative": {
-                    "dx": float(relative[0]),
-                    "dy": float(relative[1]),
-                    "dtheta": 0.0,
-                },
-            }
-        result = self.auto_position(
-            robot_name=name,
-            x=float(desired_xy[0]),
-            y=float(desired_xy[1]),
-            theta=float(heading),
+        """Move robot close enough to interact with an object (base motion only)."""
+        return self.auto_position_to_object(
+            robot_name=robot_name,
+            object_name=object_name,
             wait=True,
             tolerance=0.05,
         )
-        result["object"] = obj["name"]
-        return result
 
     def auto_interact(self, robot_name, interaction_object, action):
         """Automatically interact with a cabinet, drawer, etc."""

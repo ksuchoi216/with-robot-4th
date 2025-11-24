@@ -3,6 +3,7 @@
 import argparse
 import queue
 import threading
+import math
 from typing import Literal, Optional, Union
 
 import code_repository
@@ -46,6 +47,19 @@ def _parse_cli_args():
         default=DEFAULT_XML_PATH,
         help="Default MJCF path to use when a robot entry omits an explicit xml_path.",
     )
+    parser.add_argument(
+        "--separate-scenes",
+        action="store_true",
+        help="Run each robot in its own simulator window instead of a shared scene.",
+    )
+    parser.add_argument(
+        "--spawn",
+        nargs="+",
+        help=(
+            "Initial base poses. Format name:x,y,theta or x,y,theta in robot order. "
+            "Example: --spawn alice:0.0,-2.0,0 mark:1.3,-2.0,0"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -64,6 +78,50 @@ def _build_robot_specs(robot_tokens, default_xml):
             name = f"robot{idx}"
         specs.append({"name": name, "xml_path": xml_path})
     return specs
+
+
+def _parse_pose(token):
+    parts = token.split(",")
+    if len(parts) != 3:
+        raise ValueError(f"Spawn pose must be x,y,theta: got '{token}'")
+    return tuple(float(p) for p in parts)
+
+
+def _build_spawn_map(specs, spawn_tokens):
+    # Default positions: separated along the counter to avoid collisions.
+    default_template = [
+        (-1.2, -2.2, 0.0),
+        (1.2, -2.2, 0.0),
+        (0.0, -0.8, 0.0),
+        (2.4, -0.8, 0.0),
+    ]
+    default = {}
+    for idx, spec in enumerate(specs):
+        if idx < len(default_template):
+            pose = default_template[idx]
+        else:
+            pose = (1.5 * idx, -2.2, 0.0)
+        default[spec["name"]] = pose
+    if not spawn_tokens:
+        return default
+
+    spawn_map = default.copy()
+    unnamed = []
+    for token in spawn_tokens:
+        if ":" in token:
+            name, pose = token.split(":", 1)
+            name = name.strip()
+            if not name:
+                raise ValueError(f"Invalid spawn token '{token}' (missing name)")
+            spawn_map[name] = _parse_pose(pose)
+        else:
+            unnamed.append(token)
+
+    # Apply positional tokens in the order of specs when names are omitted.
+    for spec, pose_token in zip(specs, unnamed):
+        spawn_map[spec["name"]] = _parse_pose(pose_token)
+
+    return spawn_map
 
 
 class ArmMoveRequest(BaseModel):
@@ -230,13 +288,30 @@ class AutoPositionRequest(BaseModel):
     robot_name: Optional[str] = Field(
         default=None, description="Target robot. Defaults to the first configured robot."
     )
-    x: float = Field(..., description="Target x position in meters.")
-    y: float = Field(..., description="Target y position in meters.")
-    theta: float = Field(..., description="Target yaw in radians.")
+    object_name: Optional[str] = Field(
+        default=None, description="Move near this object (uses its XY pose)."
+    )
+    x: Optional[float] = Field(
+        default=None, description="Target x position in meters (optional when object_name provided)."
+    )
+    y: Optional[float] = Field(
+        default=None, description="Target y position in meters (optional when object_name provided)."
+    )
+    theta: Optional[float] = Field(
+        default=None, description="Target yaw in radians (optional; auto-aligned when object_name provided)."
+    )
     wait: bool = Field(default=True, description="Block until pose reached.")
     tolerance: float = Field(
         default=0.1, gt=0, description="Planar tolerance when waiting."
     )
+
+    @model_validator(mode="after")
+    def validate_inputs(self):
+        has_object = self.object_name is not None
+        has_coords = self.x is not None and self.y is not None and self.theta is not None
+        if not (has_object or has_coords):
+            raise ValueError("Provide either object_name or x,y,theta.")
+        return self
 
 
 class AutoPickRequest(BaseModel):
@@ -264,7 +339,18 @@ class AutoPlaceRequest(BaseModel):
     robot_name: Optional[str] = Field(
         default=None, description="Robot performing the placement."
     )
-    target: PlaceTarget = Field(..., description="Placement target.")
+    target: Optional[PlaceTarget] = Field(
+        default=None, description="Placement target. Optional when object_name is provided."
+    )
+    object_name: Optional[str] = Field(
+        default=None, description="Place near this object when provided."
+    )
+
+    @model_validator(mode="after")
+    def validate_inputs(self):
+        if not self.target and not self.object_name:
+            raise ValueError("Provide either target coordinates or object_name.")
+        return self
 
 
 class BasePostureRequest(BaseModel):
@@ -448,11 +534,17 @@ def api_robot_pose_move(command: BaseMoveRequest):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
+        pose = robot_fleet.get_robot_pose(robot_name=command.robot_name, include_other=False)
+        shortfall = pose["error"]
+        shortfall_norm = math.sqrt(shortfall["x"] ** 2 + shortfall["y"] ** 2)
     return {
         "target": {"x": command.x, "y": command.y, "theta": command.theta},
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
+        "achieved": pose["current"],
+        "shortfall": shortfall,
+        "shortfall_norm": shortfall_norm,
     }
 
 
@@ -474,25 +566,39 @@ def api_robot_pose_move_relative(command: BaseMoveRelativeRequest):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
+        pose = robot_fleet.get_robot_pose(robot_name=command.robot_name, include_other=False)
+        shortfall = pose["error"]
+        shortfall_norm = math.sqrt(shortfall["x"] ** 2 + shortfall["y"] ** 2)
     return {
         "delta": {"dx": command.dx, "dy": command.dy, "dtheta": command.dtheta},
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
+        "achieved": pose["current"],
+        "shortfall": shortfall,
+        "shortfall_norm": shortfall_norm,
     }
 
 
 @app.post("/robot_pose/auto_position")
 def api_robot_auto_position(command: AutoPositionRequest):
-    """Automatically move a robot to a target pose while checking for obstacles."""
-    result = robot_fleet.auto_position(
-        robot_name=command.robot_name,
-        x=command.x,
-        y=command.y,
-        theta=command.theta,
-        wait=command.wait,
-        tolerance=command.tolerance,
-    )
+    """Automatically move a robot near an object or to a pose while checking for obstacles."""
+    if command.object_name:
+        result = robot_fleet.auto_position_to_object(
+            robot_name=command.robot_name,
+            object_name=command.object_name,
+            wait=command.wait,
+            tolerance=command.tolerance,
+        )
+    else:
+        result = robot_fleet.auto_position(
+            robot_name=command.robot_name,
+            x=command.x,
+            y=command.y,
+            theta=command.theta,
+            wait=command.wait,
+            tolerance=command.tolerance,
+        )
     return result
 
 
@@ -587,14 +693,19 @@ def api_robot_auto_pick(command: AutoPickRequest):
 @app.post("/robot_actions/auto_place")
 def api_robot_auto_place(command: AutoPlaceRequest):
     """Automatically place an object at the specified location."""
-    result = robot_fleet.auto_place(
-        robot_name=command.robot_name,
-        target={
-            "x": command.target.x,
-            "y": command.target.y,
-            "theta": command.target.theta,
-        },
-    )
+    if command.object_name and not command.target:
+        result = robot_fleet.auto_place_to_object(
+            robot_name=command.robot_name, object_name=command.object_name
+        )
+    else:
+        result = robot_fleet.auto_place(
+            robot_name=command.robot_name,
+            target={
+                "x": command.target.x,
+                "y": command.target.y,
+                "theta": command.target.theta,
+            },
+        )
     return result
 
 
@@ -609,7 +720,7 @@ def api_robot_base_posture(command: BasePostureRequest):
 
 @app.post("/robot_actions/auto_move_to_object")
 def api_robot_auto_move_to_object(command: AutoMoveObjectRequest):
-    """Move a robot close enough to interact with an object."""
+    """Move a robot close enough to interact with an object (base motion only)."""
     try:
         return robot_fleet.auto_move_to_object(
             robot_name=command.robot_name,
@@ -678,6 +789,16 @@ def api_robot_arm_state(
     return robot_fleet.get_arm_state(robot_name=robot_name)
 
 
+@app.get("/robot_arm/limits")
+def api_robot_arm_limits(
+    robot_name: Optional[str] = Query(
+        default=None, description="Target robot. Defaults to the first configured robot."
+    )
+):
+    """Return arm joint limits for the selected robot."""
+    return robot_fleet.get_arm_limits(robot_name=robot_name)
+
+
 @app.post("/robot_arm/move")
 def api_robot_arm_move(command: ArmMoveRequest):
     """Set desired joint angles for the Panda arm."""
@@ -688,11 +809,18 @@ def api_robot_arm_move(command: ArmMoveRequest):
         tolerance=command.tolerance,
         timeout=command.timeout,
     )
+    state = robot_fleet.get_arm_state(robot_name=command.robot_name)
+    current = [joint["position"] for joint in state["joints"]]
+    target = state["target"]
+    shortfall = [float(t - c) for t, c in zip(target, current)]
     return {
         "target": command.joint_positions,
+        "target_clipped": target,
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
+        "achieved": current,
+        "shortfall": shortfall,
     }
 
 
@@ -706,11 +834,18 @@ def api_robot_arm_move_relative(command: ArmMoveRelativeRequest):
         tolerance=command.tolerance,
         timeout=command.timeout,
     )
+    state = robot_fleet.get_arm_state(robot_name=command.robot_name)
+    current = [joint["position"] for joint in state["joints"]]
+    target = state["target"]
+    shortfall = [float(t - c) for t, c in zip(target, current)]
     return {
         "joint_deltas": command.joint_deltas,
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
+        "achieved": current,
+        "target": target,
+        "shortfall": shortfall,
     }
 
 
@@ -722,6 +857,16 @@ def api_robot_gripper_state(
 ):
     """Return gripper joint telemetry and wrench measurements."""
     return robot_fleet.get_gripper_state(robot_name=robot_name)
+
+
+@app.get("/robot_gripper/limits")
+def api_robot_gripper_limits(
+    robot_name: Optional[str] = Query(
+        default=None, description="Target robot. Defaults to the first configured robot."
+    )
+):
+    """Return gripper actuator/width limits for the selected robot."""
+    return robot_fleet.get_gripper_limits(robot_name=robot_name)
 
 
 @app.post("/robot_gripper/command")
@@ -748,12 +893,23 @@ def api_robot_gripper_command(command: GripperCommand):
         tolerance=command.tolerance,
         timeout=command.timeout,
     )
+    state = robot_fleet.get_gripper_state(robot_name=command.robot_name)
+    current_width = state["width"]
+    target = state["target"]
+    target_width_state = float(target[0] - target[1]) if target else None
+    shortfall = None
+    if target_width_state is not None:
+        shortfall = target_width_state - current_width
+
     return {
         "target_width": target_width,
+        "target_width_clipped": target_width_state,
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
         "action": command.action,
+        "achieved_width": current_width,
+        "shortfall": shortfall,
     }
 
 
@@ -767,11 +923,22 @@ def api_robot_gripper_command_relative(command: GripperDeltaCommand):
         tolerance=command.tolerance,
         timeout=command.timeout,
     )
+    state = robot_fleet.get_gripper_state(robot_name=command.robot_name)
+    current_width = state["width"]
+    target = state["target"]
+    target_width_state = float(target[0] - target[1]) if target else None
+    shortfall = None
+    if target_width_state is not None:
+        shortfall = target_width_state - current_width
+
     return {
         "width_delta": command.width_delta,
         "robot_name": command.robot_name or robot_fleet.default_robot,
         "wait": command.wait,
         "reached": reached,
+        "target_width": target_width_state,
+        "achieved_width": current_width,
+        "shortfall": shortfall,
     }
 
 
@@ -818,8 +985,13 @@ def main():
 
     args = _parse_cli_args()
     specs = _build_robot_specs(args.robots, args.default_xml)
-    robot_fleet = RobotFleet(specs)
+    spawn_map = _build_spawn_map(specs, args.spawn)
+    robot_fleet = RobotFleet(
+        specs,
+        shared_scene=not args.separate_scenes,
+    )
     code_repository.fleet = robot_fleet
+    robot_fleet.set_base_poses(spawn_map)
 
     # Start background threads (daemon=True ensures cleanup on exit)
     robot_fleet.start_simulators()
@@ -830,6 +1002,9 @@ def main():
     print(f"MuJoCo Robot Simulator API")
     print(f"{'='*60}")
     print(f"Robots: {', '.join(robot_fleet.get_robot_names())}")
+    print(
+        f"Mode: {'shared scene (one window)' if robot_fleet.shared_scene else 'separate simulators'}"
+    )
     print(f"Server: http://{HOST}:{PORT}")
     print(f"API docs: http://{HOST}:{PORT}/docs")
     print(f"{'='*60}\n")

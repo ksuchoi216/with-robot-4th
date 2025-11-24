@@ -616,6 +616,13 @@
     <mesh name="distr_cab_model_normalized_collision_10._coll" content_type="model/obj" file="assets/objects/objaverse/bagged_food/bagged_food_7/collision/model_normalized_collision_10.obj" refquat="0.707107 0.707107 0 0" scale="0.14 0.14 0.14"/>
     <mesh name="distr_cab_model_normalized_collision_12._coll" content_type="model/obj" file="assets/objects/objaverse/bagged_food/bagged_food_7/collision/model_normalized_collision_12.obj" refquat="0.707107 0.707107 0 0" scale="0.14 0.14 0.14"/>
     <mesh name="distr_cab_model_normalized_collision_13._coll" content_type="model/obj" file="assets/objects/objaverse/bagged_food/bagged_food_7/collision/model_normalized_collision_13.obj" refquat="0.707107 0.707107 0 0" scale="0.14 0.14 0.14"/>
+    <texture type="2d" name="island_apple_tex" file="assets/objects/objaverse/apple/apple_21/visual/image0.png"/>
+    <material name="island_apple_mat" texture="island_apple_tex" specular="0.5" shininess="0.36"/>
+    <mesh name="island_apple_mesh_0" content_type="model/obj" file="assets/objects/objaverse/apple/apple_21/visual/model_normalized_0.obj" scale="0.07 0.07 0.07"/>
+    <mesh name="island_apple_mesh_1" content_type="model/obj" file="assets/objects/objaverse/apple/apple_21/visual/model_normalized_1.obj" scale="0.07 0.07 0.07"/>
+    <texture type="2d" name="island_cup_tex" file="assets/objects/objaverse/cup/cup_2/visual/image0.png"/>
+    <material name="island_cup_mat" texture="island_cup_tex" specular="0.5" shininess="0.0"/>
+    <mesh name="island_cup_mesh" content_type="model/obj" file="assets/objects/objaverse/cup/cup_2/visual/model_normalized_0.obj" scale="0.115 0.115 0.115" refquat="1 0 0 0"/>
   </asset>
 
   <!-- ====================================================================== -->
@@ -667,6 +674,24 @@
     <body name="right_eef_target" pos="0 0 -1" mocap="true">
       <geom name="right_eef_target_box" size="0.05 0.05 0.05" type="box" contype="0" conaffinity="0" group="2" rgba="0.208 0.314 0.439 0.5"/>
       <geom name="right_eef_target_sphere" size="0.01" contype="0" conaffinity="0" group="2" rgba="0.208 0.314 0.439 0.8"/>
+    </body>
+    <!-- ================================================================== -->
+    <!-- PROPS: Example objects placed on the kitchen island               -->
+    <!-- ================================================================== -->
+    <body name="island_apple" pos="0.35 -0.15 0.97">
+      <freejoint/>
+      <inertial mass="0.1" pos="0 0 0" diaginertia="0.0003 0.0003 0.0003"/>
+      <geom name="island_apple_col" type="sphere" size="0.055" contype="1" conaffinity="1" group="0" density="500" friction="0.95 0.3 0.1"/>
+      <!-- Fallback sphere so it stays visible even if mesh fails to load -->
+      <geom name="island_apple_vis_sphere" type="sphere" size="0.055" rgba="0.95 0.2 0.2 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="island_apple_vis0" type="mesh" mesh="island_apple_mesh_0" material="island_apple_mat" contype="0" conaffinity="0" group="1"/>
+      <geom name="island_apple_vis1" type="mesh" mesh="island_apple_mesh_1" material="island_apple_mat" contype="0" conaffinity="0" group="1"/>
+    </body>
+    <body name="island_cup" pos="0.55 -0.1 0.97">
+      <freejoint/>
+      <inertial mass="0.05" pos="0 0 0" diaginertia="0.0002 0.0002 0.0002"/>
+      <geom name="island_cup_col" type="cylinder" size="0.05 0.07" density="1000" friction="0.95 0.3 0.1" contype="1" conaffinity="1" group="0"/>
+      <geom name="island_cup_vis" type="mesh" mesh="island_cup_mesh" material="island_cup_mat" contype="0" conaffinity="0" group="1"/>
     </body>
     <!-- ================================================================== -->
     <!-- ROBOT SYSTEM: Panda-Omron Mobile Manipulator                      -->
@@ -2822,4 +2847,5 @@
     <!-- Gripper torque sensor: Measures torque applied to end-effector -->
     <torque site="gripper0_right_ft_frame" name="gripper0_right_torque_ee"/>
   </sensor>
+
 </mujoco>
