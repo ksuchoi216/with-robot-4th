@@ -1,0 +1,12 @@
+base_xml_path: "./model/robocasa/panda_omron.xml"
+# 출력 경로를 지정하지 않으면 base_xml_path와 같은 폴더에 panda_omron_env.xml이 생성됩니다.
+out_xml_path: "./model/robocasa/panda_omron_env.xml"
+
+# 오브젝트 폴더 기본 경로 (상대 경로는 이 값을 기준으로 해석)
+object_base_dir_path: "./model/robocasa/assets/objects"
+
+# 월드에 삽입할 오브젝트 목록
+objects: []
+  # - name: sample_apple
+  #   object_dir_path: "objaverse/apple/apple_21"
+  #   position: [0.35, -0.15, 0.97]
