@@ -1,4 +1,19 @@
+#!/bin/bash
 
-# Link assets folder
-rm -rf /Users/KC/Doing/with-robot-4th/model/robocasa/assets
-ln -s /Volumes/SSD/data/20201125_asset_for_robot/assets /Users/KC/Doing/with-robot-4th/model/robocasa/assets
+# Initialize conda for bash shell
+eval "$(conda shell.bash hook)"
+
+# Activate the robot environment
+conda activate robot
+# conda info
+
+git clone https://github.com/ARISE-Initiative/robosuite
+cd robosuite
+pip install -e .
+
+cd ..
+git clone https://github.com/robocasa/robocasa
+cd robocasa
+pip install -e .
+pip install pre-commit; pre-commit install           # Optional: set up code formatter.
+
