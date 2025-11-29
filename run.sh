@@ -1,4 +1,4 @@
-#!/bin/bash
+# !/bin/zsh
 # 1) conda 초기화 - zsh hook 사용 (가장 안전한 방법)
 echo "Initializing conda..."
 eval "$(conda shell.zsh hook)" || {
@@ -21,4 +21,4 @@ echo "Active conda environment: $CONDA_DEFAULT_ENV"
 # 4) Run the MuJoCo robot simulation server
 echo "Starting MuJoCo Robot Simulator API with robots: alice, mark..."
 # mjpython ./robot/main.py --robots alice mark
-mjpython ./robot/main.py --robots alice
+mjpython ./robot/main.py --robots alice mark

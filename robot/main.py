@@ -617,6 +617,10 @@ def api_scene_objects(
         default=False,
         description="Include an axis-aligned bounding box for each object.",
     ),
+    group_top_level: bool = Query(
+        default=False,
+        description="Include a grouped view that collapses part names into coarse objects.",
+    ),
     robot_name: Optional[str] = Query(
         default=None,
         description="Robot requesting the information (optional, used for bookkeeping).",
@@ -629,7 +633,18 @@ def api_scene_objects(
         limit=limit,
         include_bounding_box=include_bounds,
     )
-    return {"count": len(objects), "objects": objects}
+    grouped = (
+        robot_fleet.group_environment_objects(
+            objects, include_bounding_box=include_bounds
+        )
+        if group_top_level
+        else None
+    )
+    response = {"count": len(objects), "objects": objects}
+    if grouped is not None:
+        response["group_count"] = len(grouped)
+        response["groups"] = grouped
+    return response
 
 
 @app.get("/scene_objects/action_area")

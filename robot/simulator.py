@@ -186,6 +186,91 @@ JOINT_TYPE_NAMES = {
     mujoco.mjtJoint.mjJNT_FREE: "free",
 }
 
+# Heuristics for grouping fine-grained MJCF body names into higher-level scene items.
+OBJECT_PREFIX_ALIASES = (
+    ("fridge_cab", "fridge"),
+    ("fridge_main", "fridge"),
+    ("fridge_housing", "fridge"),
+    ("fridge", "fridge"),
+    ("cab_main", "cabinet"),
+    ("cab_corner", "cabinet_corner"),
+    ("cab_", "cab"),
+    ("bottom_left_group", "base_cabinet_bottom_left"),
+    ("counter_corner", "counter_corner"),
+    ("counter_main", "counter"),
+    ("counter_", "counter"),
+    ("stack_1", "stack_1"),
+    ("stack_2", "stack_2"),
+    ("stack_3", "stack_3"),
+    ("stack_", "stack"),
+    ("sink_", "sink"),
+    ("stovetop", "stovetop"),
+    ("shelves", "shelves"),
+    ("microwave", "microwave"),
+    ("micro_housing", "microwave"),
+    ("oven", "oven"),
+    ("dishwasher", "dishwasher"),
+    ("coffee_machine", "coffee_machine"),
+    ("paper_towel", "paper_towel"),
+    ("knife_block", "knife_block"),
+    ("utensil_holder", "utensil_holder"),
+    ("toaster", "toaster"),
+    ("plant", "plant"),
+    ("island_", "island"),
+    ("hood", "hood"),
+    ("window_group", "window"),
+    ("wall", "wall"),
+    ("floor", "floor"),
+    ("light_switch", "light_switch"),
+    ("outlet", "outlet"),
+    ("stool_", "stool"),
+    ("distr_counter", "distribution_counter"),
+    ("distr_cab", "distribution_cabinet"),
+)
+OBJECT_GROUP_STOP_TOKENS = {
+    "group",
+    "handle",
+    "hinge",
+    "hingedoor",
+    "drawer",
+    "door",
+    "knob",
+    "spout",
+    "frame",
+    "trim",
+    "shelf",
+    "box",
+    "inner",
+    "housing",
+    "support",
+    "eef",
+    "gripper",
+    "joint",
+    "link",
+    "target",
+    "room",
+    "backing",
+    "switch",
+    "outlet",
+    "base",
+    "vert",
+    "horiz",
+}
+OBJECT_GROUP_SKIP_TOKENS = {
+    "main",
+    "left",
+    "right",
+    "front",
+    "rear",
+    "center",
+    "bot",
+    "bottom",
+    "top",
+    "upper",
+    "lower",
+    "base",
+}
+
 
 class MujocoSimulator:
     """MuJoCo simulator with PD-controlled mobile base position tracking."""
@@ -1564,6 +1649,92 @@ class RobotFleet:
             limit=limit,
             include_bounding_box=include_bounding_box,
         )
+
+    @staticmethod
+    def _canonical_object_label(name: str) -> str:
+        """Collapse verbose MJCF body names into a coarse object label."""
+        lname = (name or "").lower()
+        for prefix, alias in OBJECT_PREFIX_ALIASES:
+            if lname.startswith(prefix):
+                return alias
+
+        tokens = lname.split("_")
+        root = []
+        for tok in tokens:
+            if tok in OBJECT_GROUP_STOP_TOKENS:
+                break
+            if tok in OBJECT_GROUP_SKIP_TOKENS or not tok:
+                continue
+            root.append(tok)
+        if not root and tokens:
+            root.append(tokens[0])
+        return "_".join(root) if root else lname
+
+    @staticmethod
+    def _merge_bounding_boxes(current, candidate):
+        """Expand an aggregate bounding box with a new member box."""
+        if not candidate:
+            return current
+        if current is None:
+            return {
+                "min": dict(candidate["min"]),
+                "max": dict(candidate["max"]),
+            }
+        merged_min = {
+            axis: min(current["min"][axis], candidate["min"][axis])
+            for axis in ("x", "y", "z")
+        }
+        merged_max = {
+            axis: max(current["max"][axis], candidate["max"][axis])
+            for axis in ("x", "y", "z")
+        }
+        return {"min": merged_min, "max": merged_max}
+
+    @staticmethod
+    def _finalize_bounding_box(bbox):
+        """Compute size for an aggregate bounding box."""
+        if bbox is None:
+            return None
+        size = {axis: bbox["max"][axis] - bbox["min"][axis] for axis in ("x", "y", "z")}
+        bbox["size"] = size
+        return bbox
+
+    def group_environment_objects(self, objects, include_bounding_box=False):
+        """
+        Aggregate fine-grained environment parts into higher-level objects.
+
+        Returns a list of dicts with:
+            name: coarse group label
+            members: original MJCF body names within the group
+            representative: first member (useful for debugging)
+            count: number of members
+            bounding_box: union bbox (when include_bounding_box is True and available)
+        """
+        groups = {}
+        for obj in objects:
+            group_name = self._canonical_object_label(obj.get("name", ""))
+            entry = groups.get(group_name)
+            if entry is None:
+                entry = {"name": group_name, "members": []}
+                if include_bounding_box:
+                    entry["bounding_box"] = None
+                groups[group_name] = entry
+            entry["members"].append(obj["name"])
+            if "representative" not in entry:
+                entry["representative"] = obj["name"]
+            if include_bounding_box and obj.get("bounding_box"):
+                entry["bounding_box"] = self._merge_bounding_boxes(
+                    entry["bounding_box"], obj["bounding_box"]
+                )
+
+        grouped_list = []
+        for name in sorted(groups):
+            entry = groups[name]
+            entry["count"] = len(entry["members"])
+            if include_bounding_box:
+                entry["bounding_box"] = self._finalize_bounding_box(entry["bounding_box"])
+            grouped_list.append(entry)
+        return grouped_list
 
     def get_action_area(self, object_name, fallback_to_bbox=True):
         primary = self._primary_simulator()

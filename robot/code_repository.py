@@ -61,6 +61,100 @@ def offset_target_position(
     )
 
 
+def _heading_delta(robot_name, distance):
+    """Compute dx, dy in the world frame for a forward/backward move."""
+    pose = get_robot_pose(robot_name=robot_name)
+    theta = float(pose["current"]["theta"])
+    dist = float(distance)
+    dx = dist * math.cos(theta)
+    dy = dist * math.sin(theta)
+    return dx, dy
+
+
+def move_ahead(
+    robot_name=None,
+    distance=0.0,
+    wait=True,
+    tolerance=0.1,
+    theta_weight=0.5,
+    timeout=20.0,
+):
+    """
+    Move the robot forward along its current heading by `distance` meters.
+    Positive distance moves ahead; negative distance moves backward.
+    """
+    dx, dy = _heading_delta(robot_name, distance)
+    return offset_target_position(
+        dx,
+        dy,
+        0.0,
+        robot_name=robot_name,
+        wait=wait,
+        tolerance=tolerance,
+        theta_weight=theta_weight,
+        timeout=timeout,
+    )
+
+
+def move_back(
+    robot_name=None,
+    distance=0.0,
+    wait=True,
+    tolerance=0.1,
+    theta_weight=0.5,
+    timeout=20.0,
+):
+    """Move the robot backward along its current heading by `distance` meters."""
+    return move_ahead(
+        robot_name=robot_name,
+        distance=-float(distance),
+        wait=wait,
+        tolerance=tolerance,
+        theta_weight=theta_weight,
+        timeout=timeout,
+    )
+
+
+def rotate_left(
+    robot_name=None,
+    angle=0.0,
+    wait=True,
+    tolerance=0.1,
+    theta_weight=0.5,
+    timeout=20.0,
+):
+    """Rotate the robot counter-clockwise by `angle` radians."""
+    return offset_target_position(
+        dx=0.0,
+        dy=0.0,
+        dtheta=float(angle),
+        robot_name=robot_name,
+        wait=wait,
+        tolerance=tolerance,
+        theta_weight=theta_weight,
+        timeout=timeout,
+    )
+
+
+def rotate_right(
+    robot_name=None,
+    angle=0.0,
+    wait=True,
+    tolerance=0.1,
+    theta_weight=0.5,
+    timeout=20.0,
+):
+    """Rotate the robot clockwise by `angle` radians."""
+    return rotate_left(
+        robot_name=robot_name,
+        angle=-float(angle),
+        wait=wait,
+        tolerance=tolerance,
+        theta_weight=theta_weight,
+        timeout=timeout,
+    )
+
+
 def get_robot_pose(robot_name=None, include_other_robot=False):
     """Return pose information for the requested robot (and optionally its peers)."""
     return _require_fleet().get_robot_pose(
@@ -206,18 +300,41 @@ def auto_pick(robot_name, object_name):
     )
 
 
-def auto_place(robot_name, target):
+def auto_place(robot_name, target=None, object_name=None):
     """
-    Place an object at a target location.
+    Place an object at a target location or near a named object.
 
     Args:
         robot_name: Robot performing the place operation.
         target: dict with keys x, y, optional theta.
+        object_name: optional environment object to place near.
     """
-    return _require_fleet().auto_place(
-        robot_name=robot_name,
-        target=target,
-    )
+    if target is not None:
+        return _require_fleet().auto_place(
+            robot_name=robot_name,
+            target=target,
+        )
+    if object_name is not None:
+        return _require_fleet().auto_place_to_object(
+            robot_name=robot_name,
+            object_name=object_name,
+        )
+    raise ValueError("Provide either a placement target or an object_name.")
+
+
+def pick_object(robot_name, object_name):
+    """Pick up the specified object (alias for auto_pick)."""
+    return auto_pick(robot_name=robot_name, object_name=object_name)
+
+
+def place_object(robot_name, object_name, receptacle_object):
+    """
+    Place the specified object at/near a receptacle object.
+
+    The robot is expected to already hold `object_name`. The `receptacle_object`
+    identifies where to place it (e.g., a shelf or countertop).
+    """
+    return auto_place(robot_name=robot_name, object_name=receptacle_object)
 
 
 def set_arm_joint_positions(
@@ -374,6 +491,10 @@ def exec_code(code):
         - Functions (all accept `robot_name=None`):
             * set_target_position(x, y, theta, robot_name=None, wait=True, tolerance=0.1, theta_weight=0.5)
             * offset_target_position(dx, dy, dtheta, robot_name=None, wait=True, tolerance=0.1, theta_weight=0.5)
+            * move_ahead(robot_name=None, distance=0.0, wait=True, tolerance=0.1, theta_weight=0.5, timeout=20.0)
+            * move_back(robot_name=None, distance=0.0, wait=True, tolerance=0.1, theta_weight=0.5, timeout=20.0)
+            * rotate_left(robot_name=None, angle=0.0, wait=True, tolerance=0.1, theta_weight=0.5, timeout=20.0)
+            * rotate_right(robot_name=None, angle=0.0, wait=True, tolerance=0.1, theta_weight=0.5, timeout=20.0)
             * get_robot_pose(robot_name=None, include_other_robot=False)
             * get_environment_map(include_robot=False, name_prefix=None, limit=None, include_bounding_box=False, robot_name=None)
             * get_action_area(object_name, fallback_to_bbox=True, robot_name=None)
@@ -383,7 +504,9 @@ def exec_code(code):
             * move_to_base_posture(robot_name=None, keep_object=False)
             * auto_move_to_object(robot_name, object_name)
             * auto_pick(robot_name, object_name)
-            * auto_place(robot_name, target)
+            * auto_place(robot_name, target=None, object_name=None)
+            * pick_object(robot_name, object_name)
+            * place_object(robot_name, object_name, receptacle_object)
             * auto_interact(robot_name, interaction_object, action)
             * get_payload_state(robot_name=None)
             * predict_base_collision(robot_name=None, target=None, delta=None)
@@ -403,6 +526,10 @@ def exec_code(code):
         "PI": np.pi,
         "set_target_position": set_target_position,
         "offset_target_position": offset_target_position,
+        "move_ahead": move_ahead,
+        "move_back": move_back,
+        "rotate_left": rotate_left,
+        "rotate_right": rotate_right,
         "get_robot_pose": get_robot_pose,
         "get_environment_map": get_environment_map,
         "get_action_area": get_action_area,
@@ -413,6 +540,8 @@ def exec_code(code):
         "auto_move_to_object": auto_move_to_object,
         "auto_pick": auto_pick,
         "auto_place": auto_place,
+        "pick_object": pick_object,
+        "place_object": place_object,
         "auto_interact": auto_interact,
         "get_payload_state": get_payload_state,
         "predict_base_collision": predict_base_collision,
