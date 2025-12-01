@@ -4,10 +4,10 @@ import queue
 import threading
 
 import code_repository
+import functions
 import uvicorn
 from fastapi import FastAPI, Response, status
 from fastapi.responses import JSONResponse
-import functions
 from simulator import MujocoSimulator
 
 # Server configuration
