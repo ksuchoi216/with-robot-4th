@@ -2,28 +2,30 @@
 
 import queue
 import threading
+
+import code_repository
 import uvicorn
 from fastapi import FastAPI, Response, status
 from fastapi.responses import JSONResponse
+import functions
 from simulator import MujocoSimulator
-import code_repository
-
 
 # Server configuration
 HOST = "0.0.0.0"  # Listen on all network interfaces
-PORT = 8800       # API server port
+PORT = 8800  # API server port
 VERSION = "0.0.1"
 
 # FastAPI application instance
 app = FastAPI(
     title="MuJoCo Robot Simulator API",
     description="Control Panda-Omron mobile robot via REST API",
-    version=VERSION
+    version=VERSION,
 )
 
 # Create simulator instance and inject into code_repository
 simulator = MujocoSimulator()
 code_repository.simulator = simulator
+functions.register_routes(app, simulator)
 
 # Thread-safe queue for action processing
 actions_queue = queue.Queue()
@@ -38,10 +40,10 @@ def process_actions(action):
     #         action = actions_queue.get(timeout=0.1)
     #         action = action["action"]
 
-    #         print(f"\n{"="*60}")
+    #         print(f"\n{'='*60}")
     #         print(f"Received Action:", action)
 
-            # Execute code action in sandboxed environment
+    # Execute code action in sandboxed environment
     RESULT = {}
     if action["type"] == "run_code":
         code_str = action["payload"].get("code")
@@ -54,20 +56,21 @@ def process_actions(action):
             print(f"  Type: {type(e).__name__}")
             print(f"  Message: {e}")
             import traceback
+
             print(f"\n[TRACEBACK]")
             traceback.print_exc()
-    print(f"{"="*60}\n")
+    print(f"{'='*60}\n")
     return RESULT
 
-        #     actions_queue.task_done()
+    #     actions_queue.task_done()
 
-        # except queue.Empty:
-        #     # No action available, continue loop
-        #     continue
-        # except Exception as e:
-        #     print(f"Error processing action: {e}")
-        #     import traceback
-        #     traceback.print_exc()
+    # except queue.Empty:
+    #     # No action available, continue loop
+    #     continue
+    # except Exception as e:
+    #     print(f"Error processing action: {e}")
+    #     import traceback
+    #     traceback.print_exc()
 
 
 def run_simulator():
@@ -95,15 +98,19 @@ def receive_action(payload: dict):
         }
     """
     # Validate action format
-    if "action" in payload and "type" in payload["action"] and "payload" in payload["action"]:
+    if (
+        "action" in payload
+        and "type" in payload["action"]
+        and "payload" in payload["action"]
+    ):
         RESULT = process_actions(payload["action"])
         return JSONResponse(
             status_code=status.HTTP_200_OK,
-            content={"status": "success", "result": RESULT}
+            content={"status": "success", "result": RESULT},
         )
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={"status": "error", "message": "Invalid action format"}
+        content={"status": "error", "message": "Invalid action format"},
     )
 
 
@@ -121,12 +128,12 @@ def main():
     # threading.Thread(target=process_actions, daemon=True).start()
 
     # Display startup information
-    print(f"\n{"="*60}")
+    print(f"\n{'='*60}")
     print(f"MuJoCo Robot Simulator API")
-    print(f"{"="*60}")
+    print(f"{'='*60}")
     print(f"Server: http://{HOST}:{PORT}")
     print(f"API docs: http://{HOST}:{PORT}/docs")
-    print(f"{"="*60}\n")
+    print(f"{'='*60}\n")
 
     # Start FastAPI server (blocking call)
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")

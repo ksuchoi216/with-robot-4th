@@ -1,6 +1,7 @@
 """Sandboxed code execution layer for mobile base control with waiting logic."""
 
 import time
+
 import numpy as np
 from simulator import MujocoSimulator
 
@@ -8,14 +9,21 @@ from simulator import MujocoSimulator
 simulator: MujocoSimulator = None
 
 
-def _wait_for_convergence(get_pos_diff_fn, get_vel_fn, pos_threshold, vel_threshold,
-                          timeout=10.0, stable_frames=5, verbose=False):
+def _wait_for_convergence(
+    get_pos_diff_fn,
+    get_vel_fn,
+    pos_threshold,
+    vel_threshold,
+    timeout=10.0,
+    stable_frames=5,
+    verbose=False,
+):
     """Wait for position and velocity convergence with stability check."""
     start_time = time.time()
     stable_count = 0
     iterations = 0
-    pos_error = float('inf')
-    vel_error = float('inf')
+    pos_error = float("inf")
+    vel_error = float("inf")
 
     while time.time() - start_time < timeout:
         pos_diff = get_pos_diff_fn()
@@ -29,7 +37,9 @@ def _wait_for_convergence(get_pos_diff_fn, get_vel_fn, pos_threshold, vel_thresh
             stable_count += 1
             if stable_count >= stable_frames:
                 if verbose:
-                    print(f"Converged after {time.time() - start_time:.2f}s ({iterations} iterations)")
+                    print(
+                        f"Converged after {time.time() - start_time:.2f}s ({iterations} iterations)"
+                    )
                 return True
         else:
             stable_count = 0  # Reset if not stable
@@ -45,7 +55,9 @@ def _wait_for_convergence(get_pos_diff_fn, get_vel_fn, pos_threshold, vel_thresh
             time.sleep(0.02)
 
     if verbose:
-        print(f"Timeout after {timeout}s (pos_error={pos_error:.4f}, vel_error={vel_error:.4f})")
+        print(
+            f"Timeout after {timeout}s (pos_error={pos_error:.4f}, vel_error={vel_error:.4f})"
+        )
     return False
 
 
@@ -69,6 +81,7 @@ def set_mobile_target_joint(mobile_target_position, timeout=10.0, verbose=False)
 
     success = True
     if success and timeout > 0:
+
         def get_mobile_pos_diff_weighted():
             diff = simulator.get_mobile_joint_diff()
             diff[-1] /= 2  # Theta weighted at 50%
@@ -81,7 +94,7 @@ def set_mobile_target_joint(mobile_target_position, timeout=10.0, verbose=False)
             vel_threshold=0.05,  # ~0.05 m/s or rad/s
             timeout=timeout,
             stable_frames=5,
-            verbose=verbose
+            verbose=verbose,
         )
         success = converged
     return success
@@ -114,7 +127,7 @@ def set_arm_target_joint(arm_target_position, timeout=10.0, verbose=False):
             vel_threshold=0.1,  # ~0.1 rad/s
             timeout=timeout,
             stable_frames=5,
-            verbose=verbose
+            verbose=verbose,
         )
         success = converged
     return success
@@ -149,7 +162,7 @@ def set_ee_target_position(target_pos, timeout=10.0, verbose=False):
             vel_threshold=0.1,
             timeout=timeout,
             stable_frames=5,
-            verbose=verbose
+            verbose=verbose,
         )
         success = converged
     return success
@@ -183,7 +196,7 @@ def set_target_gripper_width(target_width, timeout=10.0, verbose=False):
             vel_threshold=0.02,
             timeout=timeout,
             stable_frames=5,
-            verbose=verbose
+            verbose=verbose,
         )
         time.sleep(1.0)
         success = converged
