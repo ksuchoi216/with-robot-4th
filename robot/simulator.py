@@ -1,8 +1,10 @@
 """MuJoCo robot simulator with automatic position control for Panda-Omron mobile manipulator."""
 
 import time
+
+import mujoco
+import mujoco.viewer
 import numpy as np
-import mujoco, mujoco.viewer
 from scipy.spatial.transform import Rotation as R
 
 
@@ -13,13 +15,13 @@ class RobotConfig:
     MOBILE_JOINT_NAMES = [
         "mobilebase0_joint_mobile_side",
         "mobilebase0_joint_mobile_forward",
-        "mobilebase0_joint_mobile_yaw"
+        "mobilebase0_joint_mobile_yaw",
     ]
 
     MOBILE_ACTUATOR_NAMES = [
         "mobilebase0_actuator_mobile_side",
         "mobilebase0_actuator_mobile_forward",
-        "mobilebase0_actuator_mobile_yaw"
+        "mobilebase0_actuator_mobile_yaw",
     ]
 
     # Panda arm joints: [joint1 ~ joint7]
@@ -30,7 +32,7 @@ class RobotConfig:
         "robot0_joint4",
         "robot0_joint5",
         "robot0_joint6",
-        "robot0_joint7"
+        "robot0_joint7",
     ]
 
     ARM_ACTUATOR_NAMES = [
@@ -40,7 +42,7 @@ class RobotConfig:
         "robot0_torq_j4",
         "robot0_torq_j5",
         "robot0_torq_j6",
-        "robot0_torq_j7"
+        "robot0_torq_j7",
     ]
 
     # End effector site name
@@ -49,7 +51,7 @@ class RobotConfig:
     # Gripper actuator names (2-finger parallel gripper)
     GRIPPER_ACTUATOR_NAMES = [
         "gripper0_right_gripper_finger_joint1",
-        "gripper0_right_gripper_finger_joint2"
+        "gripper0_right_gripper_finger_joint2",
     ]
 
     # Mobile PID controller gains
@@ -77,7 +79,9 @@ class RobotConfig:
     CAM_ELEVATION = -25
 
     MOBILE_INIT_POSITION = np.array([-1.0, 0.0, np.pi])
-    ARM_INIT_POSITION = np.array([-0.0114, -1.0319,  0.0488, -2.2575,  0.0673,  1.5234, 0.6759])
+    ARM_INIT_POSITION = np.array(
+        [-0.0114, -1.0319, 0.0488, -2.2575, 0.0673, 1.5234, 0.6759]
+    )
     GRIPPER_INIT_WIDTH = 0.08
 
 
@@ -87,24 +91,34 @@ class MujocoSimulator:
     def __init__(self, xml_path="../model/robocasa/site.xml"):
         """Initialize simulator with MuJoCo model and control indices."""
         self.model = mujoco.MjModel.from_xml_path(xml_path)
-        self.data  = mujoco.MjData(self.model)
+        self.data = mujoco.MjData(self.model)
         self._mobile_target_joint = RobotConfig.MOBILE_INIT_POSITION.copy()
         self._arm_target_joint = RobotConfig.ARM_INIT_POSITION.copy()
         self._gripper_target_width = RobotConfig.GRIPPER_INIT_WIDTH
-        self.dt = self.model.opt.timestep # PID timestep
-        self._mobile_error_integral = np.zeros(3,) # I of PID
+        self.dt = self.model.opt.timestep  # PID timestep
+        self._mobile_error_integral = np.zeros(
+            3,
+        )  # I of PID
 
         # Resolve joint/actuator names to indices
-        self.mobile_joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                                 for name in RobotConfig.MOBILE_JOINT_NAMES]
-        self.mobile_actuator_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-                                    for name in RobotConfig.MOBILE_ACTUATOR_NAMES]
-        
+        self.mobile_joint_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            for name in RobotConfig.MOBILE_JOINT_NAMES
+        ]
+        self.mobile_actuator_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            for name in RobotConfig.MOBILE_ACTUATOR_NAMES
+        ]
+
         # Resolve Panda arm joint IDs and set initial positions
-        self.arm_joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                              for name in RobotConfig.ARM_JOINT_NAMES]
-        self.arm_actuator_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-                                 for name in RobotConfig.ARM_ACTUATOR_NAMES]
+        self.arm_joint_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            for name in RobotConfig.ARM_JOINT_NAMES
+        ]
+        self.arm_actuator_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            for name in RobotConfig.ARM_ACTUATOR_NAMES
+        ]
         self.arm_dof_indices = []
         for joint_id in self.arm_joint_ids:
             dof_adr = self.model.jnt_dofadr[joint_id]
@@ -112,15 +126,19 @@ class MujocoSimulator:
             self.arm_dof_indices.extend(range(dof_adr, dof_adr + dof_num))
 
         # Resolve end effector site ID
-        self.ee_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, RobotConfig.EE_SITE_NAME)
+        self.ee_site_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_SITE, RobotConfig.EE_SITE_NAME
+        )
         # Body used to measure the mobile base pose in world coordinates
         self.mobile_base_body_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "mobilebase0_base"
         )
 
         # Resolve gripper actuator IDs
-        self.gripper_actuator_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-                                     for name in RobotConfig.GRIPPER_ACTUATOR_NAMES]
+        self.gripper_actuator_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+            for name in RobotConfig.GRIPPER_ACTUATOR_NAMES
+        ]
 
         # Resolve object IDs
         self.object_ids = []
@@ -128,17 +146,21 @@ class MujocoSimulator:
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i)
             if name and name.startswith("object_"):
                 self.object_ids.append(i)
-        
+
         # Set initial mobile base positions (qpos) and velocities (ctrl=0 for velocity control)
-        for i, (joint_id, actuator_id) in enumerate(zip(self.mobile_joint_ids, self.mobile_actuator_ids)):
+        for i, (joint_id, actuator_id) in enumerate(
+            zip(self.mobile_joint_ids, self.mobile_actuator_ids)
+        ):
             self.data.qpos[joint_id] = RobotConfig.MOBILE_INIT_POSITION[i]
             self.data.ctrl[actuator_id] = 0.0  # velocity control is 0.0
 
         # Set initial joint positions (qpos) and actuator targets (ctrl)
-        for i, (joint_id, actuator_id) in enumerate(zip(self.arm_joint_ids, self.arm_actuator_ids)):
+        for i, (joint_id, actuator_id) in enumerate(
+            zip(self.arm_joint_ids, self.arm_actuator_ids)
+        ):
             self.data.qpos[joint_id] = RobotConfig.ARM_INIT_POSITION[i]
             self.data.ctrl[actuator_id] = RobotConfig.ARM_INIT_POSITION[i]
-        
+
         # Forward kinematics 계산
         mujoco.mj_forward(self.model, self.data)
 
@@ -151,7 +173,7 @@ class MujocoSimulator:
         if joint_type in (mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_HINGE):
             return 1
         raise ValueError(f"Unsupported joint type for joint_id {joint_id}")
-    
+
     # ============================================================
     # Mobile Base Control Methods
     # ============================================================
@@ -176,11 +198,13 @@ class MujocoSimulator:
 
     def get_mobile_joint_position(self):
         """Get current mobile joint position [x, y, theta] from joint states."""
-        return np.array([
-            self.data.qpos[self.mobile_joint_ids[0]],
-            self.data.qpos[self.mobile_joint_ids[1]],
-            self.data.qpos[self.mobile_joint_ids[2]]
-        ])
+        return np.array(
+            [
+                self.data.qpos[self.mobile_joint_ids[0]],
+                self.data.qpos[self.mobile_joint_ids[1]],
+                self.data.qpos[self.mobile_joint_ids[2]],
+            ]
+        )
 
     def get_mobile_joint_diff(self):
         """Get mobile base position error [delta_x, delta_y, delta_theta] between target and current position."""
@@ -188,11 +212,13 @@ class MujocoSimulator:
 
     def get_mobile_joint_velocity(self):
         """Get current mobile base velocity [vx, vy, omega] from joint velocities."""
-        return np.array([
-            self.data.qvel[self.mobile_joint_ids[0]],
-            self.data.qvel[self.mobile_joint_ids[1]],
-            self.data.qvel[self.mobile_joint_ids[2]]
-        ])
+        return np.array(
+            [
+                self.data.qvel[self.mobile_joint_ids[0]],
+                self.data.qvel[self.mobile_joint_ids[1]],
+                self.data.qvel[self.mobile_joint_ids[2]],
+            ]
+        )
 
     def _compute_mobile_control(self):
         """Compute PD control commands [vx, vy, omega] for mobile base to reach target."""
@@ -200,12 +226,14 @@ class MujocoSimulator:
         current_vel = self.get_mobile_joint_velocity()
 
         pos_error = self._mobile_target_joint - current_pos
-        pos_error[2] = np.arctan2(np.sin(pos_error[2]), np.cos(pos_error[2]))  # Normalize angle
+        pos_error[2] = np.arctan2(
+            np.sin(pos_error[2]), np.cos(pos_error[2])
+        )  # Normalize angle
         self._mobile_error_integral += pos_error * self.dt
         self._mobile_error_integral = np.clip(
             self._mobile_error_integral,
             -RobotConfig.MOBILE_I_LIMIT,
-            RobotConfig.MOBILE_I_LIMIT
+            RobotConfig.MOBILE_I_LIMIT,
         )
 
         p_term = RobotConfig.MOBILE_KP * pos_error
@@ -226,7 +254,7 @@ class MujocoSimulator:
     def set_arm_target_joint(self, arm_target_joint):
         """
         Set arm target joint positions [j1~j7] in radians.
-        
+
         Args:
             arm_target_joint: Array-like of 7 joint angles in radians
         """
@@ -260,7 +288,7 @@ class MujocoSimulator:
     # ============================================================
     # End Effector Control Methods
     # ============================================================
-    
+
     @staticmethod
     def _rotation_matrix_to_euler_xyz(rot):
         """Convert rotation matrix to XYZ Euler angles [roll, pitch, yaw]."""
@@ -312,14 +340,18 @@ class MujocoSimulator:
 
             jacobian = self._compute_ee_jacobian(ik_data)[:3, :]
             jjt = jacobian @ jacobian.T
-            damping = (RobotConfig.IK_DAMPING ** 2) * np.eye(jacobian.shape[0])
+            damping = (RobotConfig.IK_DAMPING**2) * np.eye(jacobian.shape[0])
             inv_term = np.linalg.inv(jjt + damping)
             dq = jacobian.T @ (inv_term @ pos_error)
             q += RobotConfig.IK_STEP_SIZE * dq
-            q = np.clip(q, RobotConfig.ARM_JOINT_LIMITS[:, 0], RobotConfig.ARM_JOINT_LIMITS[:, 1])
+            q = np.clip(
+                q,
+                RobotConfig.ARM_JOINT_LIMITS[:, 0],
+                RobotConfig.ARM_JOINT_LIMITS[:, 1],
+            )
 
         return False, q
-    
+
     def set_ee_target_position(self, target_pos):
         """Set end effector target position in world frame."""
         success, joint_angles = self._solve_ik_position(target_pos)
@@ -334,29 +366,29 @@ class MujocoSimulator:
     def get_gripper_width(self):
         """Get current gripper width in meters."""
         return 2.0 * self.data.ctrl[self.gripper_actuator_ids[0]]
-    
+
     def set_target_gripper_width(self, width):
         """Set target gripper width in meters (0.0 = closed, 0.08 = fully open)."""
         self._gripper_target_width = np.clip(width, 0.0, 0.08)
-    
+
     def get_gripper_width_diff(self):
         """Get gripper width error between target and current position."""
         return self._gripper_target_width - self.get_gripper_width()
-    
+
     def get_gripper_width_velocity(self):
         """Get gripper width velocity."""
         return self.data.ctrl[self.gripper_actuator_ids[0]]
-    
+
     def _compute_gripper_control(self):
         """Compute gripper control commands.
-        
+
         Returns:
             Array of control commands for gripper actuators [finger1, finger2]
         """
         # Target width is symmetric: finger1 = +width/2, finger2 = -width/2
         target_finger1 = self._gripper_target_width / 2.0
         target_finger2 = -self._gripper_target_width / 2.0
-        
+
         return np.array([target_finger1, target_finger2])
 
     # ============================================================
@@ -370,9 +402,11 @@ class MujocoSimulator:
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, i)
             if name and name.startswith("object_"):
                 objects[name] = {
-                    'id': i,
-                    'pos': self.data.xpos[i].tolist(), 
-                    'ori': self._rotation_matrix_to_euler_xyz(self.data.xmat[i]).tolist()
+                    "id": i,
+                    "pos": self.data.xpos[i].tolist(),
+                    "ori": self._rotation_matrix_to_euler_xyz(
+                        self.data.xmat[i]
+                    ).tolist(),
                 }
         return objects
 
