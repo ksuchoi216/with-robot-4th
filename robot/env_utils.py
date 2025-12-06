@@ -172,3 +172,61 @@ def nearest_fixtures(
         items.append((name, dist))
     items.sort(key=lambda x: x[1])
     return items[:limit]
+
+
+def _representative_fixture_for_group(group_name: str, fixture_names: List[str]) -> Optional[str]:
+    """
+    Select a stable fixture to represent the group's facing direction.
+
+    Preference order:
+        1) Exact "{group_name}_main"
+        2) Names ending with "_main" but not containing "door"/"handle"
+        3) Names ending with "_root"
+        4) Any fixture that starts with the group name
+    """
+    def priority(name: str) -> Tuple[int, int]:
+        if name == f"{group_name}_main":
+            return (0, len(name))
+        lowered = name.lower()
+        if lowered.endswith("_main") and "door" not in lowered and "handle" not in lowered:
+            return (1, len(name))
+        if lowered.endswith("_root"):
+            return (2, len(name))
+        if lowered.startswith(group_name):
+            return (3, len(name))
+        return (4, len(name))
+
+    if not fixture_names:
+        return None
+    return sorted(fixture_names, key=priority)[0]
+
+
+def compute_group_front_thetas(simulator, fixture_body_ids: Dict[str, int]) -> Dict[str, float]:
+    """
+    Estimate front-facing yaw (theta) for each group using fixture orientation.
+
+    Assumes the local -Y axis of the representative fixture points toward the
+    front of the appliance/cabinet. Uses world rotation from the MuJoCo data.
+    """
+    fixtures_by_group: Dict[str, List[str]] = {}
+    for name in fixture_body_ids:
+        gname = group_name_from_body(name)
+        if gname is None:
+            continue
+        fixtures_by_group.setdefault(gname, []).append(name)
+
+    front_thetas: Dict[str, float] = {}
+    for gname, names in fixtures_by_group.items():
+        representative = _representative_fixture_for_group(gname, names)
+        if representative is None:
+            continue
+        body_id = fixture_body_ids.get(representative)
+        if body_id is None:
+            continue
+
+        rot = simulator.data.xmat[body_id].reshape(3, 3)
+        front_dir = rot @ np.array([0.0, -1.0, 0.0])  # local -Y as forward
+        theta = float(np.arctan2(front_dir[1], front_dir[0]))
+        front_thetas[gname] = theta
+
+    return front_thetas

@@ -13,6 +13,7 @@ from simulator import MujocoSimulator
 from env_utils import (
     compute_fixture_bounds,
     compute_group_bounds,
+    compute_group_front_thetas,
     find_containing_group,
     group_name_from_body,
     nearest_fixtures,
@@ -91,6 +92,7 @@ def _collect_fixture_and_group_info(
         return {}, {}, {}, {}
 
     fixture_bounds = compute_fixture_bounds(simulator, fixture_body_ids)
+    group_front_thetas = compute_group_front_thetas(simulator, fixture_body_ids)
     fixtures: Dict[str, Any] = {}
     for name, body_id in fixture_body_ids.items():
         if name not in fixture_bounds:
@@ -107,6 +109,8 @@ def _collect_fixture_and_group_info(
             "boundary": [bmin.tolist(), bmax.tolist()],
             "fixtures": [name for name in fixtures if group_name_from_body(name) == group_name],
         }
+        if group_name in group_front_thetas:
+            groups[group_name]["front_theta"] = group_front_thetas[group_name]
 
     return fixtures, groups, fixture_bounds, group_bounds
 
